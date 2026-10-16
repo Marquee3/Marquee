@@ -1,0 +1,29 @@
+{
+  "uid": "calculator_line_items_app",
+  "type": "app",
+  "config": {
+    "name": "Calculator line items",
+    "description": "Creates deal line items from calculator output, ready for the team to review and quote.",
+    "distribution": "private",
+    "auth": {
+      "type": "static",
+      "requiredScopes": [
+        "crm.objects.deals.read",
+        "crm.objects.deals.write",
+        "crm.objects.line_items.read",
+        "crm.objects.line_items.write",
+        "crm.objects.quotes.read",
+        "crm.schemas.deals.read",
+        "crm.schemas.deals.write",
+        "e-commerce"
+      ],
+      "optionalScopes": [],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": [],
+      "iframe": [],
+      "img": []
+    }
+  }
+}

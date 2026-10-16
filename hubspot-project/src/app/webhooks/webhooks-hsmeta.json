@@ -1,0 +1,51 @@
+{
+  "uid": "calculator_line_items_webhooks",
+  "type": "webhooks",
+  "config": {
+    "settings": {
+      "targetUrl": "https://YOUR-APP-HOST/webhooks/hubspot",
+      "maxConcurrentRequests": 5
+    },
+    "subscriptions": {
+      "crmObjects": [],
+      "legacyCrmObjects": [
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "calc_line_items_frozen",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "guest_count",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "marquee_extras",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "marquee_install_cost",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "marquee_length_m",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "marquee_price_per_sqm",
+          "active": true
+        },
+        {
+          "subscriptionType": "deal.propertyChange",
+          "propertyName": "marquee_width_m",
+          "active": true
+        }
+      ],
+      "hubEvents": []
+    }
+  }
+}
