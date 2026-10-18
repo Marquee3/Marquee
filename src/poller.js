@@ -1,14 +1,13 @@
-// Finds recently changed deals by polling HubSpot's search API, so that
-// any calculator, including one added later, is picked up without
-// subscribing to its properties in the HubSpot app's webhook settings.
-// It also catches anything webhooks miss, such as changes made while the
-// service was down, or calculation properties that don't send webhooks.
+// Node version of the change poller (the Cloudflare Worker uses a cron
+// trigger instead; see src/worker.js). Every interval it searches HubSpot for
+// deals modified since the last sweep and queues those that need a sync, so
+// any calculator, including one added later, is picked up without webhook
+// subscriptions. It also catches what webhooks miss, such as changes made
+// while the service was down.
 
-import { DEAL } from './properties.js';
+import { findChangedDeals, findErrorDeals, toMs } from './sweep.js';
 
-// HubSpot's search API returns at most 10,000 results per query.
-const MAX_PAGES = 50;
-const PAGE_SIZE = 200;
+const MAX_RETRIES = 5;
 
 export class DealPoller {
   #hubspot;
@@ -17,14 +16,31 @@ export class DealPoller {
   #intervalMs;
   #lookbackMs;
   #overlapMs;
+  #quietMs;
+  #maxPages;
+  #errorRecheckEvery;
   #logger;
   #now;
   #since = null;
   #seen = new Map(); // dealId -> hs_lastmodifieddate already queued
+  #retries = new Map(); // dealId -> attempts so far
+  #sweeps = 0;
   #timer = null;
   #stopped = false;
 
-  constructor({ hubspot, queue, config, intervalMs = 60_000, lookbackMs = 60 * 60_000, overlapMs = 2 * 60_000, logger, now = Date.now }) {
+  constructor({
+    hubspot,
+    queue,
+    config,
+    intervalMs = 60_000,
+    lookbackMs = 60 * 60_000,
+    overlapMs = 2 * 60_000,
+    quietMs = 5_000,
+    errorRecheckMinutes = 15,
+    maxPages = 50,
+    logger,
+    now = Date.now,
+  }) {
     this.#hubspot = hubspot;
     this.#queue = queue;
     this.#config = config;
@@ -33,6 +49,9 @@ export class DealPoller {
     // HubSpot's search index trails writes slightly, so each sweep looks a
     // little further back than where the last one ended.
     this.#overlapMs = overlapMs;
+    this.#quietMs = quietMs;
+    this.#maxPages = maxPages;
+    this.#errorRecheckEvery = Math.max(1, Math.round((errorRecheckMinutes * 60_000) / intervalMs));
     this.#logger = logger;
     this.#now = now;
   }
@@ -55,66 +74,73 @@ export class DealPoller {
     clearTimeout(this.#timer);
   }
 
-  /** Queue a sync for every relevant deal modified since the last sweep. */
+  /**
+   * Ask for a deal to be synced again on the next sweep, after a sync that
+   * failed for a reason that may pass (see `retry` in LineItemSync results).
+   */
+  retryLater(dealId) {
+    const attempts = (this.#retries.get(String(dealId)) ?? 0) + 1;
+    if (attempts > MAX_RETRIES) {
+      this.#retries.delete(String(dealId));
+      this.#logger?.error('giving up retrying deal sync', { dealId, attempts: MAX_RETRIES });
+      return;
+    }
+    this.#retries.set(String(dealId), attempts);
+  }
+
+  /** Queue a sync for every deal changed since the last sweep that needs one. */
   async sweep() {
     const startedAt = this.#now();
     this.#since ??= startedAt - this.#lookbackMs;
-    const properties = [...new Set([...this.#config.inputProperties, DEAL.status, DEAL.fingerprint, 'hs_lastmodifieddate'])];
+    this.#sweeps++;
 
-    let after;
-    let pages = 0;
-    let capped = false;
-    let latest = null;
-    let scanned = 0;
-    let queued = 0;
-    do {
-      const page = await this.#hubspot.searchDealsModifiedSince(this.#since, properties, { after, limit: PAGE_SIZE });
-      for (const deal of page.results) {
-        scanned++;
-        const modified = deal.properties?.hs_lastmodifieddate ?? null;
-        const modifiedMs = toMs(modified);
-        if (Number.isFinite(modifiedMs)) latest = Math.max(latest ?? modifiedMs, modifiedMs);
-        // Seen in an earlier sweep's overlap with no change since.
-        if (modified && this.#seen.get(String(deal.id)) === modified) continue;
-        this.#seen.set(String(deal.id), modified);
-        if (!isRelevant(deal.properties ?? {}, this.#config)) continue;
-        this.#queue.enqueue(String(deal.id));
-        queued++;
-      }
-      after = page.after;
-      if (after && ++pages >= MAX_PAGES) {
-        capped = true;
-        this.#logger?.warn('more deals changed than one search can return; continuing next sweep', { scanned });
-        break;
-      }
-    } while (after);
+    // Retries first, so a failed sweep doesn't drop them.
+    const retrying = [...this.#retries.keys()];
+    for (const id of retrying) {
+      this.#seen.delete(id);
+      this.#queue.enqueue(id);
+    }
 
-    // Move the window forward. Results are oldest first, so when capped,
-    // the next sweep carries on from the last deal reached.
-    const end = latest === null ? startedAt : Math.min(latest, startedAt);
-    this.#since = Math.max(this.#since, capped ? end : end - this.#overlapMs);
+    const result = await findChangedDeals({
+      hubspot: this.#hubspot,
+      config: this.#config,
+      sinceMs: this.#since,
+      quietMs: this.#quietMs,
+      maxPages: this.#maxPages,
+      now: startedAt,
+      seen: this.#seen,
+      onDeal: (id) => this.#queue.enqueue(id),
+    });
+
+    // Move the window forward using HubSpot's own timestamps, never the
+    // server clock, so clock drift can't skip changes. When the page budget
+    // ran out, carry on from exactly where it stopped.
+    const next = result.capped ? result.cursor : result.cursor - this.#overlapMs;
+    this.#since = Math.max(this.#since, next);
+    if (result.capped) this.#logger?.warn('many deals changed; continuing next sweep', { scanned: result.scanned });
     for (const [id, modified] of this.#seen) {
       if (!(toMs(modified) >= this.#since)) this.#seen.delete(id);
     }
 
-    if (queued) this.#logger?.info('deal poll', { scanned, queued });
-    return { scanned, queued, since: this.#since };
+    let errorsRequeued = 0;
+    if (this.#sweeps % this.#errorRecheckEvery === 0) {
+      await findErrorDeals({
+        hubspot: this.#hubspot,
+        onDeal: (id) => {
+          errorsRequeued++;
+          this.#queue.enqueue(id);
+        },
+      });
+    }
+
+    const queued = result.found + retrying.length + errorsRequeued;
+    if (queued) this.#logger?.info('deal poll', { scanned: result.scanned, queued, retried: retrying.length || undefined, errorsRequeued: errorsRequeued || undefined });
+    return { scanned: result.scanned, queued, since: this.#since };
   }
-}
 
-// Worth a sync: a calculator input is filled in, or the app has synced the
-// deal before (so it may need lines removed). Everything else is skipped
-// without another API call.
-function isRelevant(properties, config) {
-  if (properties[DEAL.status] || properties[DEAL.fingerprint]) return true;
-  return config.inputProperties.some((name) => {
-    const value = properties[name];
-    return value !== null && value !== undefined && value !== '';
-  });
-}
-
-// HubSpot returns datetimes as ISO strings; accept epoch milliseconds too.
-function toMs(value) {
-  if (value === null || value === undefined || value === '') return NaN;
-  return /^\d+$/.test(String(value)) ? Number(value) : Date.parse(value);
+  /** Record a sync outcome: clears or schedules retries. */
+  handleResult(dealId, result) {
+    if (result?.retry) this.retryLater(dealId);
+    else this.#retries.delete(String(dealId));
+  }
 }

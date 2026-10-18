@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const MAX_TIMESTAMP_AGE_MS = 5 * 60_000;
@@ -45,4 +46,13 @@ export function dealIdsFromEvents(payload, { portalId } = {}) {
     if (isDeal && ['propertyChange', 'creation', 'restore'].includes(action)) ids.add(String(event.objectId));
   }
   return [...ids];
+}
+
+/** Deal IDs from a /sync body: {"dealId"}, {"dealIds": []} or a workflow webhook payload. */
+export function dealIdsFromSyncRequest(body) {
+  if (!body || typeof body !== 'object') return [];
+  const candidates = Array.isArray(body.dealIds)
+    ? body.dealIds
+    : [body.dealId ?? body.objectId ?? body.hs_object_id ?? body.properties?.hs_object_id?.value ?? body.properties?.hs_object_id];
+  return candidates.filter((id) => /^\d+$/.test(String(id ?? ''))).map(String);
 }

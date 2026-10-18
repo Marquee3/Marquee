@@ -1,10 +1,11 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, loadConfig, parseConfig } from '../src/config.js';
+import { ConfigError, parseConfig } from '../src/config.js';
+import { loadConfig } from '../src/config-loader.js';
 import { evaluateCalculators } from '../src/calculators.js';
 
 const minimal = (lineItems, calc = {}) => ({
@@ -68,10 +69,43 @@ test('each file in calculators/ is one calculator, loaded in name order', async 
   assert.ok(!config.inputProperties.includes('dealstage'), 'syncWhen properties are not calculator inputs');
 });
 
-test('a missing folder or settings file just means defaults', async () => {
-  const config = await loadConfig(await configDirWith({}));
+test('an empty calculators folder is valid; settings default', async () => {
+  const dir = await configDirWith({});
+  await mkdir(join(dir, 'calculators'));
+  const config = await loadConfig(dir);
   assert.deepEqual(config.calculators, []);
   assert.equal(config.settings.skipWhenQuoteExists, true);
+});
+
+test('a missing calculators folder is an error, not "no calculators"', async () => {
+  // Otherwise a wrong CONFIG_DIR would look like every calculator was deleted.
+  const dir = await configDirWith({ 'settings.json': {} });
+  await assert.rejects(loadConfig(dir), /calculators folder not found: .*calculators/);
+  await assert.rejects(loadConfig(join(dir, 'does-not-exist')), /calculators folder not found/);
+});
+
+test('symlinked calculator files are loaded (e.g. Kubernetes ConfigMap mounts)', async () => {
+  const dir = await configDirWith({ 'shared/licences.json': { id: 'licences', lineItems: [LINE] } });
+  await mkdir(join(dir, 'calculators'));
+  await symlink(join(dir, 'shared', 'licences.json'), join(dir, 'calculators', 'licences.json'));
+  await symlink(join(dir, 'shared', 'missing.json'), join(dir, 'calculators', 'dangling.json'));
+  const config = await loadConfig(dir);
+  assert.deepEqual(config.calculators.map((c) => c.id), ['licences']);
+});
+
+test('a byte-order mark at the start of a file is fine', async () => {
+  const dir = await configDirWith({ 'calculators/a.json': `\uFEFF${JSON.stringify({ id: 'a', lineItems: [LINE] })}` });
+  assert.equal((await loadConfig(dir)).calculators.length, 1);
+});
+
+test('each calculator lists the deal properties it reads', () => {
+  const config = parseConfig({
+    calculators: [
+      { id: 'a', appliesWhen: 'x > 0', lineItems: [{ key: 'l', product: { id: '1' }, quantity: 'y', name: 'N {{z}}' }] },
+      { id: 'b', lineItems: [{ key: 'l', product: { id: '1' }, quantity: 1 }] },
+    ],
+  });
+  assert.deepEqual(config.calculators.map((c) => c.inputProperties), [['x', 'y', 'z'], []]);
 });
 
 test('problems in every file are reported at once, named by file', async () => {

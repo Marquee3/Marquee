@@ -1,0 +1,34 @@
+// Cloudflare Workers deployment. See README > Deploy to Cloudflare.
+{
+  "name": "calculator-line-items",
+  "main": "src/worker-entry.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Validates config/ and bundles the calculator files into the Worker.
+  "build": {
+    "command": "node scripts/bundle-config.js",
+    "watch_dir": ["src", "config"]
+  },
+
+  // Check HubSpot for changed deals every minute.
+  "triggers": { "crons": ["* * * * *"] },
+
+  // One message per deal sync, processed one at a time, retried on failure.
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "calculator-line-items" }],
+    "consumers": [
+      { "queue": "calculator-line-items", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 5 }
+    ]
+  },
+
+  // Secrets (set with `npx wrangler secret put <NAME>`, never here):
+  //   HUBSPOT_ACCESS_TOKEN   required
+  //   HUBSPOT_CLIENT_SECRET  only for webhooks
+  //   SYNC_API_KEY           only for POST /sync
+  "vars": {
+    "HUBSPOT_API_VERSION": "2026-09"
+  },
+
+  "observability": { "enabled": true }
+}

@@ -4,26 +4,28 @@ A small service that turns the pricing your calculators put on a HubSpot deal in
 **line items**, with the right products and quantities, so the team only has to review them and
 create the quote.
 
-- **Built to grow.** Each calculator is one small file in `config/calculators/`. To support a
-  new calculator, add a file. Nothing else changes, not even the HubSpot app's settings (see
+- **Built to grow.** Each calculator is one small file in `config/calculators/`. To support a new
+  calculator, add a file and deploy. The HubSpot app doesn't need changing (see
   [Adding a calculator](#adding-a-calculator)).
 - **Dynamic quantities and prices.** Quantities, prices and line names are formulas over deal
   properties, e.g. `ceil(licence_seats / 25)`.
 - **No duplicates.** Re-running, retries and overlapping triggers update the existing line items
   rather than adding more (see [How duplicates are prevented](#how-duplicates-are-prevented)).
-- **Ready for review.** Each sync writes a status and a plain-English summary on the deal. The
-  service never touches line items the team added by hand, and it stops changing a deal once it
-  has a quote.
+- **Ready for review, and respects the team's edits.** Each sync writes a status and a
+  plain-English summary on the deal. A line is only re-applied when its own calculated values
+  change. Line items added by hand are never touched, and the service stops changing a deal once
+  it has a quote.
 
-It runs as a small Node.js web service with no npm dependencies. Hosting costs a few dollars a
-month at most.
+It runs on **Cloudflare Workers** (free plan, or $5/month for headroom) with a **HubSpot
+project-based app**. It can also run as an ordinary Node.js service
+([Running on a Node host](#running-on-a-node-host-instead)).
 
 > [!IMPORTANT]
-> **HubSpot is retiring legacy private apps.** Existing HubSpot accounts can't create *new*
-> legacy private apps after **26 October 2026**. Apps created before then keep working.
-> HubSpot ends support for legacy apps and the numbered (`/v3/`) APIs this service uses in
-> **September 2027**. The service works with either kind of app; see
-> [Step 1](#1-create-the-hubspot-app).
+> **Built for HubSpot's current platform.** Legacy private apps can't be created after
+> 26 October 2026 and go unsupported in September 2027, along with HubSpot's numbered
+> (`/v3/`, `/v4/`) APIs. This service uses a project-based app on developer platform `2026.09`
+> and HubSpot's date-based API `2026-09`, both supported until at least March 2028. See
+> [Staying current](#staying-current).
 
 ## How it works
 
@@ -31,18 +33,20 @@ month at most.
  A calculator writes its results to deal properties
             │
             ▼
- The service notices the deal changed:
-   • every minute it asks HubSpot for recently changed deals (works for any calculator), and/or
-   • HubSpot webhooks tell it straight away (optional)
-            │
-            ▼
- Sync the deal (one sync per deal at a time)
-   1. read the deal's calculator properties
-   2. evaluate every calculator → the line items the deal should have
-   3. look up products by SKU in the product library
-   4. compare with the line items already on the deal
-   5. create / update / remove only the calculators' own line items
-   6. write status + summary to the deal: "Ready for review"
+ Every minute (Cloudflare cron trigger)              Optional: HubSpot webhook
+ search HubSpot for deals changed recently           for instant updates
+ and work out which need a sync (no extra calls)             │
+            │                                                │
+            └──────────────► Cloudflare Queue ◄──────────────┘
+                             one message per deal, one at a time, retried on failure
+                                      │
+                                      ▼
+                             Sync the deal
+                               1. evaluate every calculator → lines the deal should have
+                               2. look up products by SKU in the product library
+                               3. compare with the deal's line items
+                               4. create / update / remove only lines whose output changed
+                               5. write status + summary: "Ready for review"
 ```
 
 Each line item the service creates has a **Calculator line key** property (`calc_line_key`), set
@@ -53,29 +57,31 @@ items on later syncs.
 
 | Situation | What happens |
 | --- | --- |
-| Calculator output now includes a line the deal doesn't have | Line item created from the product |
-| Quantity / price / name changed | Existing line item updated in place |
-| Line no longer in the output (excluded, quantity 0, calculator no longer applies) | That line item removed |
-| The line's product changed | Old line item removed, new one created from the new product |
+| Calculator output includes a line the deal doesn't have yet | Line item created from the product |
+| A line's calculated quantity / price / name changed | That line item is updated in place |
+| A line is no longer in the output (excluded, quantity 0, calculator no longer applies) | That line item removed |
+| A line's product changed | Old line item removed, new one created from the new product |
+| A line's calculated values did **not** change | **Left as the team left it**: hand edits, or a deliberate deletion, stand |
 | Line items added by hand (no calculator key) | **Never touched** |
-| Discounts, tax or other fields the team edits on a calculator line | **Kept**; only quantity, position and (if configured) price, name and description are managed |
-| Calculator output unchanged since last sync | Nothing written, so manual tweaks survive unrelated edits to the deal |
+| Discounts, tax or other fields the team edits | **Never touched**: only quantity, position and (if configured) price, name and description are managed |
+| Line items from a calculator whose file was removed from the config | **Never touched** (`npm run plan` lists them) |
 | Deal has a quote | Nothing changed; status says why (configurable) |
 | "Calculator line items: freeze" ticked | Nothing changed; unticking re-syncs |
-| A calculator input is blank or invalid | Nothing changed; status "Needs attention" says which property |
-| No calculator applies and the service has never touched the deal | Nothing read beyond the deal, nothing written |
+| A calculator input is blank or invalid, or a SKU isn't in the product library | Nothing changed; status "Needs attention" says which property or SKU; re-checked every 15 minutes |
+| No calculator applies and the service has never touched the deal | Nothing written |
 
 ### How duplicates are prevented
 
 1. **Keyed line items.** Syncs match existing line items by `calc_line_key` and update them, so
    running a sync twice gives the same result as running it once.
-2. **Debounce and per-deal serialization.** A calculator often writes several properties, and
-   each can trigger the service. It waits until a deal has been quiet for 5 seconds, then runs one
-   sync. It never runs two syncs of the same deal at once.
+2. **One sync at a time.** On Cloudflare, the queue processes one deal at a time; on a Node host,
+   syncs of the same deal never overlap. Deals that changed in the last few seconds wait for the
+   next check, so a calculator that writes several properties is synced once it's finished.
 3. **Clean-up after creating.** After creating line items, the service re-reads the deal. If the
    same key now appears twice, it keeps the copy with the lowest ID and removes the rest. This
-   catches a second server instance or a retried request that had in fact gone through. Every
-   process picks the same copy to keep, so two clean-ups can never remove all of them.
+   catches a retried request that had in fact gone through, or a manual sync running alongside the
+   service. Every process picks the same copy to keep, so two clean-ups can never remove all of
+   them.
 
 ## Adding a calculator
 
@@ -92,8 +98,8 @@ properties**. To support a new one:
    npm run new-calculator -- training "Training calculator"
    ```
 
-   This creates `config/calculators/training.json` with placeholders. Fill it in (see
-   [Calculator file reference](#calculator-file-reference), and the two worked examples in
+   This creates `config/calculators/training.json` with placeholders. Fill it in (see the
+   [Calculator file reference](#calculator-file-reference) and the worked examples in
    [`examples/calculators/`](examples/calculators/)):
 
    ```json
@@ -109,52 +115,62 @@ properties**. To support a new one:
    ```
 
 4. **Check it:** `npm run check` validates every calculator file and confirms the properties and
-   SKUs exist in HubSpot. Then `npm run plan -- <test deal id>` shows exactly what the new
-   calculator would add to a real deal, without changing anything.
-5. **Deploy:** commit the file and redeploy. Most hosts redeploy automatically on a push. On the
-   next poll (within a minute), deals using the new calculator get their line items.
+   SKUs exist in HubSpot. `npm run plan -- <test deal id>` shows exactly what the calculator would
+   do to a real deal, without changing anything.
+5. **Deploy:** commit the file and deploy (`npm run deploy`, or automatically on push if you
+   connect the repository to Cloudflare). A broken calculator file fails the build, so it can't go
+   live.
+6. **Backfill existing deals:** deals changed after the deploy pick up the new calculator within
+   a minute. Deals that already have its values but don't change again need a one-off sync:
 
-That's all: no code changes, and no changes to the HubSpot app. If you use webhooks for instant
-updates, re-run `npm run webhooks` and add the new calculator's properties to the subscriptions.
-Until you do, the minute-by-minute poll still covers it.
+   ```sh
+   npm run sync -- --calculator training --dry-run   # see what would change
+   npm run sync -- --calculator training             # do it
+   ```
 
-Calculators are independent: a deal can use one, several or none. Each owns only its own lines.
-Files load in name order, which is also the order lines appear on the deal (prefix names with
-`10-`, `20-`… to control it). **Don't rename** a calculator's `id` or a line's `key` once it's
-live: existing deals' lines would look new, so they'd be removed and recreated on the next sync.
+The HubSpot app doesn't need changing. If you've added webhooks for instant updates, also add the
+new calculator's properties to them (`npm run webhooks`). Until then, the minute-by-minute check
+covers it.
+
+Calculators are independent: a deal can use one, several or none, and each owns only its own
+lines. Files load in name order, which is also the order lines appear on the deal (prefix names
+with `10-`, `20-`… to control it). **Don't rename** a calculator's `id` or a line's `key` once
+it's live: existing deals' lines would look new, so they'd be removed and recreated on the next
+sync. **Deleting a calculator file** leaves its existing lines on deals, so remove them by hand if
+needed.
 
 ## Setting it up
 
 ### 1. Create the HubSpot app
 
-The service needs an access token. A client secret is only needed if you add webhooks. Either kind
-of app works.
-
-**Option A: Legacy private app (quickest; must be created before 26 October 2026).**
-In HubSpot: *Settings → Integrations → Private apps* (may be labelled *Legacy apps*) → *Create*.
-
-- **Scopes:** `crm.objects.deals.read`, `crm.objects.deals.write`, `crm.objects.line_items.read`,
-  `crm.objects.line_items.write`, `crm.objects.quotes.read` and `e-commerce` (products).
-  `npm run setup` and `npm run check` also need permission to read and create deal properties
-  (`crm.schemas.deals.read` / `crm.schemas.deals.write`). If HubSpot labels scopes differently,
-  pick the equivalents.
-- **Token** (and client secret, for webhooks): the app's *Auth* tab.
-
-**Option B: Project-based app (HubSpot's replacement for private apps).**
-`hubspot-project/` holds the app definition (`app-hsmeta.json`: static auth, private
-distribution, the scopes above). With the
-[HubSpot CLI](https://developers.hubspot.com/docs/developer-tooling/local-development/hubspot-cli/install-the-cli)
-installed: `cd hubspot-project && hs project upload`, install the app in your account, and copy
-its static access token. These files follow HubSpot's documented format but haven't yet been
-uploaded to HubSpot. If `hs project upload` rejects a field, fix it as the CLI says; nothing in
-the service depends on these files.
-
-### 2. Check it locally
-
-Needs Node.js 20.12 or later.
+The app gives the service an access token, plus a client secret if you add webhooks.
+`hubspot-project/` holds the app definition: platform `2026.09`, private distribution, static
+auth, and these scopes: `crm.objects.deals.read`, `crm.objects.deals.write`,
+`crm.objects.line_items.read`, `crm.objects.line_items.write`, `crm.objects.quotes.read`,
+`crm.schemas.deals.read`, `crm.schemas.deals.write`, `crm.schemas.line_items.read` and
+`e-commerce` (products).
 
 ```sh
-cp .env.example .env              # add HUBSPOT_ACCESS_TOKEN
+npm install -g @hubspot/cli     # HubSpot's CLI
+hs account auth                 # connect it to your HubSpot account
+cd hubspot-project && hs project upload
+```
+
+Then, in HubSpot, open the app (Development → Projects), install it in your account, and copy its
+**access token** (and **client secret**, for webhooks) from the app's auth settings. If
+`hs project upload` rejects a field (HubSpot's config format moves quickly), fix it as the CLI
+says; nothing in the service depends on these files.
+
+*Already have a legacy private app with these scopes?* Its token works too, until legacy apps go
+unsupported in September 2027.
+
+### 2. Try it locally
+
+Needs Node.js 22 or later.
+
+```sh
+npm install                       # installs Wrangler (Cloudflare's CLI); the service itself has no dependencies
+cp .env.example .env              # add HUBSPOT_ACCESS_TOKEN, for the commands below
 npm test                          # unit tests, no HubSpot needed
 npm run setup                     # create the app's deal + line item properties (safe to re-run)
 npm run new-calculator -- …       # add your first calculator (see above)
@@ -172,64 +188,83 @@ definitions are in `src/properties.js`):
 | Deal | Calculator line items: details | What the last sync did, or what to fix |
 | Deal | Calculator line items: last updated | When the status last changed |
 | Deal | Calculator line items: freeze | Tick to stop changes; untick to re-sync |
-| Deal | Calculator line items: fingerprint | Internal: skips no-op syncs |
+| Deal | Calculator line items: fingerprint | Internal: which line values were last applied |
 | Line item | Calculator line key | Marks line items the service owns |
 
-### 3. Deploy
+### 3. Deploy to Cloudflare
 
-Any host that runs Node.js 20.12+ (or the included `Dockerfile`) works, e.g. Render, Railway,
-Fly.io, Google Cloud Run or a small VM. Run **one instance**. More are safe because of the
-clean-up step, but one is all this needs. Start command: `npm start`. Choose a host that
-redeploys on a push, and adding a calculator is just a commit.
+One-off setup, from the repository folder:
 
-| Variable | | |
+```sh
+npx wrangler login
+npx wrangler queues create calculator-line-items
+npx wrangler secret put HUBSPOT_ACCESS_TOKEN
+npm run deploy
+```
+
+`npm run deploy` validates and bundles `config/` into the Worker, then deploys it with a cron
+trigger (every minute) and the queue. To deploy automatically on every push, connect the GitHub
+repository in the Cloudflare dashboard (Workers & Pages → the worker → Settings → Builds), using
+`npx wrangler deploy` as the deploy command. Then adding a calculator really is just a commit.
+
+Logs: `npx wrangler tail`, or the worker's Logs tab in the Cloudflare dashboard. Look for
+`deal sync` and `deal poll` entries.
+
+**Free plan or Paid ($5/month)?** At a minute-by-minute check, the service uses about 1,440 cron
+runs a day, plus about three Queue operations for each deal it syncs. That's well inside the free
+plan's 100,000 requests and 10,000 queue operations a day, for up to roughly 3,000 deal syncs a
+day. On the free plan each run gets 10 ms of CPU time and 50 outbound requests; one deal sync uses
+about 5–15. The Paid plan removes those ceilings, and is the safer choice for busy accounts.
+
+Optional Worker settings (`vars` in `wrangler.jsonc`, or the dashboard):
+
+| Variable | Default | |
 | --- | --- | --- |
-| `HUBSPOT_ACCESS_TOKEN` | required | App access token |
-| `SYNC_POLL_SECONDS` | default 60 | How often to check HubSpot for changed deals; `0` turns polling off (webhooks only) |
-| `SYNC_POLL_LOOKBACK_MINUTES` | default 60 | On startup, how far back to look, to catch changes made while the service was down |
-| `HUBSPOT_CLIENT_SECRET` | for webhooks | Verifies webhook signatures; webhooks are refused without it |
-| `PUBLIC_URL` | for webhooks | e.g. `https://line-items.example.com`; the URL HubSpot signs. Without it, the URL is rebuilt from proxy headers |
-| `HUBSPOT_PORTAL_ID` | optional | Ignore webhooks from other HubSpot accounts |
-| `SYNC_API_KEY` | optional | Enables `POST /sync` |
-| `SYNC_DEBOUNCE_MS` | default 5000 | Quiet period before syncing a deal |
-| `SYNC_CONCURRENCY` | default 2 | Deals synced in parallel |
-| `CONFIG_DIR` | default `config` | Folder holding `settings.json` and `calculators/` |
-| `PORT` | default 3000 | |
+| `HUBSPOT_API_VERSION` | `2026-09` | HubSpot API version; `legacy` uses the old numbered APIs |
+| `SYNC_POLL_WINDOW_MINUTES` | 5 | How far back each check looks. Keep it at least twice the cron interval, plus 2 |
+| `SYNC_CATCH_UP_MINUTES` | 65 | Once an hour, look back this far, to catch anything missed |
+| `SYNC_ERROR_RECHECK_MINUTES` | 15 | How often deals showing "Needs attention" are re-checked |
+| `SYNC_DEBOUNCE_SECONDS` | 5 | Wait this long after a change before syncing |
+| `HUBSPOT_PORTAL_ID` | none | Ignore webhooks from other HubSpot accounts |
 
-The poll uses HubSpot's search API: one request per minute, plus one read per changed deal that
-uses a calculator. That is well inside HubSpot's API limits.
+To check less often, change the cron in `wrangler.jsonc` (e.g. `*/5 * * * *`) and raise
+`SYNC_POLL_WINDOW_MINUTES` to match (e.g. 12).
 
 ### 4. Optional: webhooks for instant updates
 
-With polling, line items appear within about a minute. For near-instant updates, add webhooks:
+With the minute-by-minute check, line items appear within about a minute. For near-instant
+updates:
 
 ```sh
-npm run webhooks
+npm run webhooks -- --target-url https://calculator-line-items.<your-subdomain>.workers.dev
+cd hubspot-project && hs project upload
+npx wrangler secret put HUBSPOT_CLIENT_SECRET
 ```
 
-This lists the deal properties to subscribe to: every property the calculators read, plus the
-freeze checkbox. In a legacy private app, add a **Deal → Property changed** subscription for each
-one on the *Webhooks* tab, with target URL `https://<your host>/webhooks/hubspot`. For a project
-app, run `npm run webhooks -- --target-url https://<your host>` to write
-`hubspot-project/src/app/webhooks/webhooks-hsmeta.json`, then `hs project upload`. Set
-`HUBSPOT_CLIENT_SECRET` and `PUBLIC_URL`. Polling keeps running alongside webhooks as a safety
-net.
+This subscribes to "deal property changed" for every property the calculators read, plus the
+freeze checkbox. Re-run it after adding a calculator. The minute-by-minute check keeps running
+alongside as a safety net. These webhook config lines follow HubSpot's documented format but
+haven't been uploaded to HubSpot yet. If the CLI rejects them, the service works without
+webhooks.
 
 **Workflow alternative:** with Operations Hub Professional, a deal workflow's *Send a webhook*
-action can POST to `https://<your host>/sync` with header `Authorization: Bearer <SYNC_API_KEY>`.
+action can POST to `https://<your worker>/sync` with header `Authorization: Bearer <SYNC_API_KEY>`
+(set it with `npx wrangler secret put SYNC_API_KEY`).
 
 ### 5. Team workflow
 
-1. The calculator fills in the deal. Shortly after, the line items appear and
+1. The calculator fills in the deal. Within about a minute, the line items appear and
    **Calculator line items: status** shows *Ready for review*, with a summary in *details*.
 2. Add those two properties to the deal sidebar and to a saved deal view filtered to
    *Ready for review*. That view is the review queue.
-3. Adjust anything by hand if needed: add lines, change discounts. Then create the quote.
+3. Adjust anything by hand: add lines, change discounts or quantities. Your edits stay unless that
+   line's calculated values change. Then create the quote.
    - Once a quote exists, the service stops changing the deal's line items.
    - To lock a deal's line items without a quote, tick **freeze**.
-4. *Needs attention* means the calculator output couldn't become line items, for example a
-   blank input or an unknown SKU. *Details* names the property or SKU. Fix it and the deal
-   re-syncs on the next poll.
+4. *Needs attention* means the calculator output couldn't become line items, for example a blank
+   input or an unknown SKU. *Details* names the property or SKU. Fix it on the deal and it
+   re-syncs within a minute. Fix it elsewhere (adding a product, correcting a calculator file)
+   and it's picked up by the 15-minute re-check. Or tick and untick **freeze** to re-run at once.
 
 ## Calculator file reference
 
@@ -259,6 +294,7 @@ One calculator per file in `config/calculators/`:
   product name.
 - A quantity of **0 leaves the line off**, so "no travel" needs no special rule. Negative
   quantities and prices are errors.
+- Without `appliesWhen`, a calculator applies to **every** deal; `npm run check` warns about this.
 - Keys starting with `$` (e.g. `"$comment"`) are ignored, so you can annotate the JSON. Unknown
   fields are errors, which catches typos.
 
@@ -269,7 +305,7 @@ One calculator per file in `config/calculators/`:
 | Setting | Default | |
 | --- | --- | --- |
 | `skipWhenQuoteExists` | `true` | Leave a deal's line items alone once it has a quote |
-| `setLineOrder` | `true` | Order lines on the deal as in the config (`hs_position_on_quote`) |
+| `setLineOrder` | `true` | Order new and changed lines as in the config (`hs_position_on_quote`) |
 | `syncWhen` | none | Formula; deals that don't match are ignored entirely, e.g. `"dealstage != \"closedwon\""` |
 
 ### Formulas
@@ -289,42 +325,88 @@ Formulas refer to deal properties by **internal name**.
 
 - Blank properties are blank, not zero. Using one in arithmetic is an error that names the
   property; use `coalesce(prop, 0)` where blank should mean 0.
-- Comparisons with a blank are false, so `licence_seats > 0` is just false on deals without seats.
+- `< <= > >=` with a blank are false, so `licence_seats > 0` is just false on deals without seats.
+  But `!=` with a blank is **true**: `support_tier != "none"` is true when the tier is blank. Use
+  `!isBlank(support_tier) && support_tier != "none"` to exclude blanks.
 - Checkbox values work as true/false: `includeWhen: "needs_onboarding"`.
 
 ## Operating it
 
 | Endpoint | |
 | --- | --- |
-| `GET /health` | Liveness check |
+| `GET /health` | Liveness check; lists the deployed calculators |
 | `POST /webhooks/hubspot` | HubSpot webhooks (v3 signature required) |
-| `POST /sync` | `{"dealId": "123"}` or `{"dealIds": [...]}` or a workflow webhook payload; `Authorization: Bearer <SYNC_API_KEY>`. Add `?wait=true` to get the result, `&force=true` to re-apply even if unchanged |
+| `POST /sync` | `{"dealId": "123"}` or `{"dealIds": [...]}` or a workflow webhook payload; `Authorization: Bearer <SYNC_API_KEY>`. `?wait=true` returns the result; `&force=true` re-applies every line |
 
-Logs are one JSON object per line: a `deal sync` entry per sync, with its outcome (`synced`,
-`unchanged`, `skipped`, `noop`, `error`), and a `deal poll` entry when a poll finds changed deals.
-After each sync, the next poll sees the deal changed (the service just wrote its status) and
-checks it once more. That check finds nothing to do and writes nothing, so it stops there.
+What runs on its own:
+- **Every minute:** deals changed in the last 5 minutes are triaged from the search results
+  alone. Only those that need a sync go on the queue, so unchanged deals cost nothing beyond the
+  search.
+- **Every hour:** the same check looks back 65 minutes, to catch anything a delayed or failed run
+  missed.
+- **Every 15 minutes:** deals showing *Needs attention* are re-checked.
+- **When a sync fails** for a temporary reason (HubSpot unavailable, rate limited), the queue
+  retries it a minute later, up to 5 times.
 
-To re-run a deal by hand: `npm run sync -- <dealIds…>` (add `--force` to re-apply even if the
-calculator output hasn't changed), or tick and untick freeze on the deal.
+Commands, run locally against your account:
+
+```sh
+npm run plan -- <dealId> [--force]              # what a sync would do
+npm run sync -- <dealId>... [--force]           # sync specific deals now
+npm run sync -- --calculator <id> [--dry-run]   # backfill a calculator's deals
+npm run sync -- --all [--dry-run]               # every deal with calculator inputs or lines
+```
+
+## Running on a Node host instead
+
+The same service runs as a long-lived Node.js process (`npm start`, or the `Dockerfile`, Node 24)
+on Railway, Render, Fly.io, Cloud Run or a VM. It must run **continuously**: hosts that sleep or
+scale to zero when idle (Render's free tier, Cloud Run with min instances 0, Fly with auto-stop)
+stop the minute-by-minute check. Settings are environment variables (see `.env.example`):
+
+| Variable | Default | |
+| --- | --- | --- |
+| `HUBSPOT_ACCESS_TOKEN` | required | App access token |
+| `SYNC_POLL_SECONDS` | 60 | How often to check for changed deals. `0` turns checking off, leaving webhooks as the only trigger, so every calculator input must then be subscribed |
+| `SYNC_POLL_LOOKBACK_MINUTES` | 60 | On startup, how far back to look |
+| `HUBSPOT_CLIENT_SECRET`, `PUBLIC_URL` | for webhooks | Signature checking; `PUBLIC_URL` is the URL HubSpot calls |
+| `SYNC_API_KEY` | optional | Enables `POST /sync` |
+| `SYNC_DEBOUNCE_MS`, `SYNC_CONCURRENCY` | 5000, 2 | Quiet period; deals synced in parallel |
+| `CONFIG_DIR` | `config` | Folder holding `settings.json` and `calculators/` |
+| `HUBSPOT_API_VERSION` | `2026-09` | As on Cloudflare |
+
+A blank value means the default; an invalid one stops the service at startup with a clear error.
+
+## Staying current
+
+Everything that ages is in one place:
+
+| What | Where | Supported until | To update |
+| --- | --- | --- | --- |
+| HubSpot API version | `DEFAULT_API_VERSION` in `src/hubspot.js` (or `HUBSPOT_API_VERSION`) | `2026-09`: at least March 2028 | Set the newer version (new ones ship each March and September), run `npm test`, then `npm run plan` on a test deal |
+| HubSpot developer platform | `platformVersion` in `hubspot-project/hsproject.json` | `2026.09`: about March 2028 | Bump, then `hs project upload` |
+| Cloudflare runtime | `compatibility_date` in `wrangler.jsonc` | Indefinitely: a deployed Worker keeps its behaviour | Optional |
+| Node.js (Node host only) | `Dockerfile` | Node 24: April 2028 | Bump the image |
+
+If HubSpot's new API paths misbehave on your account, setting `HUBSPOT_API_VERSION` to `legacy`
+switches back to the older numbered APIs, which work until September 2027.
 
 ## Limitations and things to verify
 
-- **Not yet run against a live HubSpot account.** The test suite runs against a simulated
-  HubSpot, and the API calls follow HubSpot's documentation. Before going live, run `npm run plan`
-  then `npm run sync` on a test deal and check the result in HubSpot.
-- **Calculator changes need a redeploy.** Calculators are files in this repository, so adding or
-  editing one means a commit and a deploy, not a change in HubSpot's UI.
-- **Line item order:** the service sets `hs_position_on_quote` in config order. HubSpot documents
-  this property only lightly. If HubSpot rejects it, set `"setLineOrder": false` and reorder on
-  the quote instead.
-- **Multi-currency:** new line items get the deal's currency (`deal_currency_code`). If you
-  don't set prices in the config, check that the product library price is right for that
-  currency.
-- **API versions:** all HubSpot endpoints are in `src/hubspot.js`. Before September 2027, move
-  them to HubSpot's date-based API versions.
-- If someone deletes a calculator line by hand, it stays deleted until the calculator output
-  changes (or a forced sync).
+- **Not yet run against a live HubSpot or Cloudflare account.** The test suite runs against a
+  simulated HubSpot, and the Worker has been run in Cloudflare's local runtime (workerd) against a
+  mock HubSpot API. The API calls follow HubSpot's `2026-09` documentation. Before going live, run
+  `npm run plan` then `npm run sync` on a test deal and check the result in HubSpot.
+- **Line item order:** the service sets `hs_position_on_quote` on new and changed lines. HubSpot
+  documents this property only lightly. If HubSpot rejects it, set `"setLineOrder": false` and
+  reorder on the quote instead.
+- **Multi-currency:** new line items get the deal's currency (`deal_currency_code`). If you don't
+  set prices in the config, check that the product library price is right for that currency.
+- **Bulk updates:** each Cloudflare check covers up to 8,000 changed deals. Beyond that, for
+  example a large import, the hourly catch-up covers more, and
+  `npm run sync -- --all` catches the rest.
+- If someone deletes a calculator line by hand, it stays deleted until that line's calculated
+  values change (or a forced sync).
 
 ## Project layout
 
@@ -332,17 +414,20 @@ calculator output hasn't changed), or tick and untick freeze on the deal.
 config/settings.json        settings for all calculators
 config/calculators/         one file per calculator (add yours here)
 examples/calculators/       worked examples to copy from
-src/server.js               HTTP endpoints, starts the poller
-src/poller.js               finds recently changed deals
+wrangler.jsonc              Cloudflare Worker: cron trigger, queue, settings
+src/worker.js               Cloudflare handlers: webhooks, cron, queue consumer
+src/server.js, poller.js    Node host equivalents
 src/sync.js                 the sync: evaluate → compare → apply → status
+src/triage.js               what a sync would do, from a deal's properties alone
+src/sweep.js                finding changed deals with HubSpot's search
 src/calculators.js          evaluates calculator rules for a deal
-src/config.js               loads and validates the config folder
+src/config.js               validates calculator config (config-loader.js reads the folder)
 src/expression.js           the formula language (no eval)
-src/reconcile.js            diffing and duplicate detection
-src/queue.js                debounce + one sync per deal at a time
+src/reconcile.js            diffing, duplicate detection, orphan protection
 src/hubspot.js              HubSpot API client (all endpoint paths)
 src/webhooks.js             webhook signature check and event parsing
 src/cli.js                  new-calculator / check / setup / plan / sync / webhooks
-hubspot-project/            app definition for HubSpot's project-based apps
+scripts/bundle-config.js    validates and bundles config/ into the Worker at deploy
+hubspot-project/            the HubSpot project-based app
 test/                       node --test suites
 ```

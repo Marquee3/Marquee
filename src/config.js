@@ -1,5 +1,3 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { compile, compileTemplate, ExpressionError } from './expression.js';
 
 export class ConfigError extends Error {
@@ -16,73 +14,6 @@ const TOP_LEVEL_FIELDS = ['settings', 'calculators'];
 const SETTINGS_FIELDS = ['skipWhenQuoteExists', 'setLineOrder', 'syncWhen'];
 const CALCULATOR_FIELDS = ['id', 'name', 'appliesWhen', 'lineItems', 'notes'];
 const LINE_FIELDS = ['key', 'product', 'quantity', 'unitPrice', 'totalPrice', 'includeWhen', 'name', 'description', 'notes'];
-
-/**
- * Load config from a directory:
- *
- *   <dir>/settings.json            optional, settings for all calculators
- *   <dir>/calculators/<any>.json   one calculator per file
- *
- * Adding a calculator means adding a file; nothing else needs editing.
- * Files are read in name order, which is also the order their line items
- * appear on the deal.
- */
-export async function loadConfig(dir) {
-  const problems = [];
-  const settings = await readJson(join(dir, 'settings.json'), 'settings.json', problems, { optional: true });
-
-  let files = [];
-  try {
-    files = (await readdir(join(dir, 'calculators'), { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !entry.name.startsWith('.'))
-      .map((entry) => entry.name)
-      .sort();
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
-  }
-
-  const calculators = [];
-  for (const file of files) {
-    const label = `calculators/${file}`;
-    const raw = await readJson(join(dir, 'calculators', file), label, problems);
-    if (raw === undefined) continue;
-    if (!isObject(raw)) problems.push(`${label}: expected a JSON object describing one calculator`);
-    else calculators.push({ ...raw, $file: label });
-  }
-
-  // Validate the files that did parse too, so every problem shows at once.
-  try {
-    const config = parseConfig({ ...(settings === undefined ? {} : { settings }), calculators });
-    if (problems.length) throw new ConfigError(problems);
-    return config;
-  } catch (err) {
-    if (err instanceof ConfigError && problems.length && err.problems !== problems) {
-      throw new ConfigError([...problems, ...err.problems]);
-    }
-    throw err;
-  }
-}
-
-async function readJson(path, label, problems, { optional = false } = {}) {
-  let text;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT' && optional) return undefined;
-    if (err.code === 'ENOENT') {
-      problems.push(`${label}: file not found`);
-      return undefined;
-    }
-    throw err;
-  }
-  try {
-    // Some Windows editors save a byte-order mark, which JSON.parse rejects.
-    return JSON.parse(text.replace(/^﻿/, ''));
-  } catch (err) {
-    problems.push(`${label}: not valid JSON (${err.message})`);
-    return undefined;
-  }
-}
 
 /**
  * Validate a raw config object and compile its expressions. Collects every
@@ -207,6 +138,14 @@ export function parseConfig(raw) {
           });
         });
       }
+      // The deal properties this calculator reads (for backfilling its deals).
+      calc.inputProperties = [
+        ...new Set(
+          [calc.appliesWhen, ...calc.lineItems.flatMap((l) => [l.quantity, l.unitPrice, l.totalPrice, l.includeWhen, l.name, l.description])]
+            .filter(Boolean)
+            .flatMap((compiled) => compiled.identifiers),
+        ),
+      ].sort();
       calculators.push(calc);
     });
   }

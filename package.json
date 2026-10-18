@@ -1,20 +1,25 @@
 {
   "name": "calculator-line-items",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Creates HubSpot deal line items from calculator output, ready for the team to review and quote.",
   "type": "module",
   "engines": {
-    "node": ">=20.12"
+    "node": ">=22"
   },
   "scripts": {
-    "start": "node src/server.js",
     "test": "node --test",
     "new-calculator": "node src/cli.js new-calculator",
     "check": "node src/cli.js check",
     "setup": "node src/cli.js setup",
     "plan": "node src/cli.js plan",
     "sync": "node src/cli.js sync",
-    "webhooks": "node src/cli.js webhooks"
+    "webhooks": "node src/cli.js webhooks",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --test-scheduled",
+    "start": "node src/server.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.148.0"
   }
 }

@@ -15,6 +15,7 @@
         "crm.objects.quotes.read",
         "crm.schemas.deals.read",
         "crm.schemas.deals.write",
+        "crm.schemas.line_items.read",
         "e-commerce"
       ],
       "optionalScopes": [],

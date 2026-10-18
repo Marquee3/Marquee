@@ -37,19 +37,40 @@ function managedProperties(line) {
   return properties;
 }
 
+/** The calculator id part of a line key ("licences:seats" -> "licences"). */
+export function calculatorIdOf(key) {
+  return String(key).split(':')[0];
+}
+
 /**
  * Compare the line items a deal should have with the ones it has, and work
- * out the changes. Only line items carrying a calculator line key are
- * considered; manually added line items are never changed or removed.
+ * out the changes.
+ *
+ * Never touched:
+ *   - line items without a calculator line key (added by hand);
+ *   - line items from calculators that aren't in the config (`calculatorIds`),
+ *     so removing a calculator file, or a deploy that loads no calculators,
+ *     can't strip line items from deals. These are listed in `orphans`.
+ *
+ * `scope` (a Set of line keys, or null for all) limits which desired lines
+ * are re-applied: lines whose calculated values haven't changed since the
+ * last sync are left as the team may have edited (or deleted) them.
+ * Duplicates, and lines a calculator no longer produces, are always removed.
  *
  * @param desired  [{ key, productId, quantity, price, name, description, position }]
  * @param existing [{ id, properties }] line items currently on the deal
  */
-export function planReconciliation(desired, existing) {
+export function planReconciliation(desired, existing, { calculatorIds = null, scope = null } = {}) {
+  const known = (key) => !calculatorIds || calculatorIds.has(calculatorIdOf(key));
   const managed = groupByKey(existing);
-  const plan = { create: [], update: [], archive: [], keep: [] };
+  const plan = { create: [], update: [], archive: [], keep: [], orphans: [] };
 
   for (const [key, items] of managed) {
+    if (!known(key)) {
+      plan.orphans.push(...items.map((item) => ({ id: item.id, key })));
+      managed.delete(key);
+      continue;
+    }
     for (const duplicate of items.slice(1)) plan.archive.push({ id: duplicate.id, key, reason: 'duplicate' });
   }
 
@@ -57,6 +78,12 @@ export function planReconciliation(desired, existing) {
   for (const line of desired) {
     wanted.add(line.key);
     const current = managed.get(line.key)?.[0];
+    if (scope && !scope.has(line.key)) {
+      // Unchanged since the last sync: keep whatever is on the deal,
+      // including a line the team deliberately deleted.
+      if (current) plan.keep.push({ id: current.id, key: line.key });
+      continue;
+    }
     if (!current) {
       plan.create.push(line);
     } else if (String(current.properties?.hs_product_id ?? '') !== String(line.productId)) {
@@ -92,10 +119,13 @@ export function isEmptyPlan(plan) {
 /**
  * Extra copies of the same calculator line on a deal. The copy with the
  * lowest ID is kept, so two processes cleaning up at the same time both
- * remove the same extras and never delete every copy.
+ * remove the same extras and never delete every copy. Lines from
+ * calculators not in `calculatorIds` are left alone.
  */
-export function findDuplicates(lineItems) {
-  return [...groupByKey(lineItems).values()].flatMap((items) => items.slice(1));
+export function findDuplicates(lineItems, { calculatorIds = null } = {}) {
+  return [...groupByKey(lineItems)]
+    .filter(([key]) => !calculatorIds || calculatorIds.has(calculatorIdOf(key)))
+    .flatMap(([, items]) => items.slice(1));
 }
 
 function groupByKey(lineItems) {

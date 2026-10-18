@@ -1,11 +1,14 @@
 import { createServer as createHttpServer } from 'node:http';
+import { Buffer } from 'node:buffer';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { logger } from './logger.js';
 import { DealPoller } from './poller.js';
 import { DealSyncQueue } from './queue.js';
 import { createApp, loadEnv, readServerSettings } from './runtime.js';
-import { dealIdsFromEvents, verifySignatureV3 } from './webhooks.js';
+import { dealIdsFromEvents, dealIdsFromSyncRequest, verifySignatureV3 } from './webhooks.js';
+
+export { dealIdsFromSyncRequest };
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -73,15 +76,6 @@ export function createServer({ queue, clientSecret, publicUrl, portalId, syncApi
   });
 }
 
-/** Deal IDs from a /sync body: {"dealId"}, {"dealIds": []} or a workflow webhook payload. */
-export function dealIdsFromSyncRequest(body) {
-  if (!body || typeof body !== 'object') return [];
-  const candidates = Array.isArray(body.dealIds)
-    ? body.dealIds
-    : [body.dealId ?? body.objectId ?? body.hs_object_id ?? body.properties?.hs_object_id?.value ?? body.properties?.hs_object_id];
-  return candidates.filter((id) => /^\d+$/.test(String(id ?? ''))).map(String);
-}
-
 class RequestError extends Error {
   constructor(status, message) {
     super(message);
@@ -138,24 +132,33 @@ function send(res, status, body) {
 
 async function main() {
   loadEnv();
-  const { sync, config, hubspot } = await createApp();
   const settings = readServerSettings();
-  const queue = new DealSyncQueue((dealId, options) => sync.syncDeal(dealId, options), {
-    debounceMs: settings.debounceMs,
-    concurrency: settings.concurrency,
-    logger,
-  });
-  const poller =
-    settings.pollSeconds > 0
-      ? new DealPoller({
-          hubspot,
-          queue,
-          config,
-          intervalMs: settings.pollSeconds * 1000,
-          lookbackMs: settings.pollLookbackMinutes * 60_000,
-          logger,
-        })
-      : null;
+  const { sync, config, hubspot } = await createApp();
+  let poller = null;
+  const queue = new DealSyncQueue(
+    async (dealId, options) => {
+      try {
+        const result = await sync.syncDeal(dealId, options);
+        poller?.handleResult(dealId, result);
+        return result;
+      } catch (err) {
+        poller?.retryLater(dealId);
+        throw err;
+      }
+    },
+    { debounceMs: settings.debounceMs, concurrency: settings.concurrency, logger },
+  );
+  if (settings.pollSeconds > 0) {
+    poller = new DealPoller({
+      hubspot,
+      queue,
+      config,
+      intervalMs: settings.pollSeconds * 1000,
+      lookbackMs: settings.pollLookbackMinutes * 60_000,
+      quietMs: settings.debounceMs,
+      logger,
+    });
+  }
   const server = createServer({ queue, logger, ...settings });
   server.listen(settings.port, () => {
     logger.info('listening', {

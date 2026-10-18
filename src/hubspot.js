@@ -1,17 +1,38 @@
 // Minimal HubSpot REST client: just the calls this app makes.
 //
-// All endpoint paths live in this file. They use HubSpot's numbered API
-// versions (v3 objects, v4 associations), which HubSpot supports until
-// September 2027; moving to the date-based versions only means changing
-// the paths here.
+// All endpoint paths are built in paths() below. They use HubSpot's
+// date-based API versions (default 2026-09, supported until at least March
+// 2028). Moving to a newer version means changing DEFAULT_API_VERSION (or
+// setting HUBSPOT_API_VERSION) and running the tests. "legacy" switches to
+// the old numbered v3/v4 paths, as a fallback while the new ones are first
+// tried against a live account.
 
 const DEFAULT_BASE_URL = 'https://api.hubapi.com';
+export const DEFAULT_API_VERSION = '2026-09';
 const BATCH_SIZE = 100;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 // HubSpot-defined association type for line item -> deal.
 const LINE_ITEM_TO_DEAL = 20;
 // HubSpot's search API allows at most 5 filter groups (ORed) per request.
-const SEARCH_FILTER_GROUPS = 5;
+export const SEARCH_FILTER_GROUPS = 5;
+
+function paths(version) {
+  if (version === 'legacy') {
+    return {
+      object: (type, id) => `/crm/v3/objects/${type}/${encodeURIComponent(id)}`,
+      objects: (type) => `/crm/v3/objects/${type}`,
+      associations: (from, to) => `/crm/v4/associations/${from}/${to}/batch/read`,
+      properties: (type) => `/crm/v3/properties/${type}`,
+    };
+  }
+  if (!/^\d{4}-\d{2}$/.test(version)) throw new Error(`HUBSPOT_API_VERSION must look like 2026-09 or be "legacy" (got "${version}")`);
+  return {
+    object: (type, id) => `/crm/objects/${version}/${type}/${encodeURIComponent(id)}`,
+    objects: (type) => `/crm/objects/${version}/${type}`,
+    associations: (from, to) => `/crm/associations/${version}/${from}/${to}/batch/read`,
+    properties: (type) => `/crm/properties/${version}/${type}`,
+  };
+}
 
 export class HubSpotError extends Error {
   constructor({ status, method, path, body }) {
@@ -30,11 +51,15 @@ export class HubSpotClient {
   #fetch;
   #maxRetries;
   #sleep;
+  #paths;
 
   constructor({
     accessToken,
     baseUrl = DEFAULT_BASE_URL,
-    fetch: fetchImpl = globalThis.fetch,
+    apiVersion = DEFAULT_API_VERSION,
+    // Called through a wrapper: Cloudflare Workers reject fetch() called as
+    // a method of another object ("Illegal invocation").
+    fetch: fetchImpl = (...args) => globalThis.fetch(...args),
     maxRetries = 4,
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   }) {
@@ -44,6 +69,7 @@ export class HubSpotClient {
     this.#fetch = fetchImpl;
     this.#maxRetries = maxRetries;
     this.#sleep = sleep;
+    this.#paths = paths(apiVersion);
   }
 
   async request(method, path, { body, query } = {}) {
@@ -96,25 +122,17 @@ export class HubSpotClient {
   // --- Deals -------------------------------------------------------------------
 
   getDeal(dealId, properties) {
-    return this.request('GET', `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, {
-      query: { properties: properties.join(',') },
-    });
+    return this.request('GET', this.#paths.object('deals', dealId), { query: { properties: properties.join(',') } });
   }
 
   updateDeal(dealId, properties) {
-    return this.request('PATCH', `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, { body: { properties } });
+    return this.request('PATCH', this.#paths.object('deals', dealId), { body: { properties } });
   }
 
-  /** One page of deals modified at or after `sinceMs`, oldest first. */
-  async searchDealsModifiedSince(sinceMs, properties, { after, limit = 200 } = {}) {
-    const response = await this.request('POST', '/crm/v3/objects/deals/search', {
-      body: {
-        filterGroups: [{ filters: [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(sinceMs) }] }],
-        sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
-        properties,
-        limit,
-        after,
-      },
+  /** One page of a deal search. Returns { results, after }. */
+  async searchDeals({ filterGroups, sorts, properties, after, limit = 200 }) {
+    const response = await this.request('POST', `${this.#paths.objects('deals')}/search`, {
+      body: { filterGroups, sorts, properties, limit, after },
     });
     return { results: response?.results ?? [], after: response?.paging?.next?.after };
   }
@@ -124,13 +142,12 @@ export class HubSpotClient {
     const ids = new Set();
     let after;
     do {
-      const page = await this.request(
-        'GET',
-        `/crm/v4/objects/${fromType}/${encodeURIComponent(fromId)}/associations/${toType}`,
-        { query: { limit: 500, after } },
-      );
-      for (const result of page?.results ?? []) ids.add(String(result.toObjectId ?? result.id));
-      after = page?.paging?.next?.after;
+      const response = await this.request('POST', this.#paths.associations(fromType, toType), {
+        body: { inputs: [{ id: String(fromId), ...(after ? { after } : {}) }] },
+      });
+      const result = (response?.results ?? []).find((r) => String(r.from?.id) === String(fromId)) ?? response?.results?.[0];
+      for (const to of result?.to ?? []) ids.add(String(to.toObjectId ?? to.id));
+      after = result?.paging?.next?.after;
     } while (after && ids.size < max);
     return [...ids];
   }
@@ -145,7 +162,7 @@ export class HubSpotClient {
   async createLineItems(dealId, propertiesList) {
     const created = [];
     for (const batch of chunks(propertiesList, BATCH_SIZE)) {
-      const response = await this.request('POST', '/crm/v3/objects/line_items/batch/create', {
+      const response = await this.request('POST', `${this.#paths.objects('line_items')}/batch/create`, {
         body: {
           inputs: batch.map((properties) => ({
             properties,
@@ -166,7 +183,7 @@ export class HubSpotClient {
 
   async updateLineItems(updates) {
     for (const batch of chunks(updates, BATCH_SIZE)) {
-      const response = await this.request('POST', '/crm/v3/objects/line_items/batch/update', {
+      const response = await this.request('POST', `${this.#paths.objects('line_items')}/batch/update`, {
         body: { inputs: batch.map(({ id, properties }) => ({ id: String(id), properties })) },
       });
       throwOnBatchErrors(response, 'update line items');
@@ -175,7 +192,7 @@ export class HubSpotClient {
 
   async archiveLineItems(ids) {
     for (const batch of chunks(ids, BATCH_SIZE)) {
-      await this.request('POST', '/crm/v3/objects/line_items/batch/archive', {
+      await this.request('POST', `${this.#paths.objects('line_items')}/batch/archive`, {
         body: { inputs: batch.map((id) => ({ id: String(id) })) },
       });
     }
@@ -189,7 +206,7 @@ export class HubSpotClient {
     for (const batch of chunks(skus, SEARCH_FILTER_GROUPS)) {
       let after;
       do {
-        const response = await this.request('POST', '/crm/v3/objects/products/search', {
+        const response = await this.request('POST', `${this.#paths.objects('products')}/search`, {
           body: {
             filterGroups: batch.map((sku) => ({ filters: [{ propertyName: 'hs_sku', operator: 'EQ', value: sku }] })),
             properties: ['name', 'hs_sku', 'price'],
@@ -211,12 +228,12 @@ export class HubSpotClient {
   // --- Properties ----------------------------------------------------------------
 
   async getProperties(objectType) {
-    const response = await this.request('GET', `/crm/v3/properties/${objectType}`);
+    const response = await this.request('GET', this.#paths.properties(objectType));
     return response?.results ?? [];
   }
 
   createProperty(objectType, definition) {
-    return this.request('POST', `/crm/v3/properties/${objectType}`, { body: definition });
+    return this.request('POST', this.#paths.properties(objectType), { body: definition });
   }
 
   // ---------------------------------------------------------------------------
@@ -224,7 +241,7 @@ export class HubSpotClient {
   async #batchRead(objectType, ids, properties) {
     const results = [];
     for (const batch of chunks(ids, BATCH_SIZE)) {
-      const response = await this.request('POST', `/crm/v3/objects/${objectType}/batch/read`, {
+      const response = await this.request('POST', `${this.#paths.objects(objectType)}/batch/read`, {
         body: { properties, inputs: batch.map((id) => ({ id: String(id) })) },
       });
       results.push(...(response?.results ?? []));
@@ -255,3 +272,4 @@ function retryDelay(response, attempt) {
   const seconds = Number(response.headers?.get?.('retry-after'));
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 30_000) : backoff(attempt);
 }
+

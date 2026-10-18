@@ -68,7 +68,7 @@ test('creates line items from calculator output and marks the deal ready for rev
     'Added 3 line items from Hardware calculator and Licence calculator. Review them, then create the quote.',
   );
   assert.equal(deal().calc_line_items_synced_at, '2026-10-16T12:00:00.000Z');
-  assert.match(deal().calc_line_items_fingerprint, /^[0-9a-f]{32}$/);
+  assert.match(deal().calc_line_items_fingerprint, /^v2;hardware:mounts=[0-9a-f]{12};hardware:units=[0-9a-f]{12};licences:seats=[0-9a-f]{12}$/);
 });
 
 test('running again creates no duplicates and makes no writes', async () => {
@@ -340,4 +340,108 @@ test('a new calculator added to the config is picked up on the next sync', async
   assert.match(result.message, /^Added 1 line item from Training calculator\./);
   assert.deepEqual(lines().find((l) => l.key === 'training:places'), { key: 'training:places', product: '5', quantity: '4', price: '150' });
   assert.equal(lines().length, 4);
+});
+
+test('a line is only re-applied when its own calculated values change', async () => {
+  // The team edits the seats quantity by hand. Then the hardware lines change,
+  // and later a new calculator starts applying to the deal: the edit survives.
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  const seats = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'licences:seats');
+  seats.properties.quantity = '75';
+
+  hubspot.deals.get('7').properties.rooms = '7';
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'synced');
+  assert.match(result.message, /^Updated 2 line items from Hardware calculator\./);
+  assert.equal(seats.properties.quantity, '75');
+
+  const config = structuredClone(CONFIG);
+  config.calculators.push({ id: 'training', name: 'Training calculator', appliesWhen: 'trainees > 0', lineItems: [{ key: 'places', product: { id: '1' }, quantity: 'trainees' }] });
+  hubspot.deals.get('7').properties.trainees = '3';
+  const withTraining = new LineItemSync({ hubspot, config: parseConfig(config), products: new ProductResolver(hubspot) });
+  await withTraining.syncDeal('7');
+  assert.equal(seats.properties.quantity, '75');
+  assert.equal(hubspot.dealLineItems('7').length, 4);
+
+  // When the seats output itself changes, the line is re-applied.
+  hubspot.deals.get('7').properties.users = '90';
+  await withTraining.syncDeal('7');
+  assert.equal(seats.properties.quantity, '90');
+});
+
+test('lines from calculators no longer in the config are left alone', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  const config = structuredClone(CONFIG);
+  config.calculators = config.calculators.filter((c) => c.id !== 'licences');
+  const withoutLicences = new LineItemSync({ hubspot, config: parseConfig(config), products: new ProductResolver(hubspot) });
+
+  hubspot.deals.get('7').properties.rooms = '8';
+  const result = await withoutLicences.syncDeal('7', { force: true });
+  assert.equal(result.outcome, 'synced');
+  assert.deepEqual(result.plan.orphans.map((o) => o.key), ['licences:seats']);
+  assert.ok(hubspot.dealLineItems('7').some((li) => li.properties.calc_line_key === 'licences:seats'));
+});
+
+test('a deploy that loads no calculators cannot strip line items', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  const empty = new LineItemSync({ hubspot, config: parseConfig({ calculators: [] }), products: new ProductResolver(hubspot) });
+  hubspot.deals.get('7').properties.rooms = '9';
+  await empty.syncDeal('7');
+  await empty.syncDeal('7', { force: true });
+  assert.equal(hubspot.dealLineItems('7').length, 3);
+  assert.deepEqual(hubspot.writeCalls().filter((c) => c.name === 'archiveLineItems'), []);
+});
+
+test('if the status cannot be saved after changing lines, the sync asks to be retried', async () => {
+  const { hubspot, sync, deal } = setup();
+  hubspot.failUpdateDeal = () => {
+    throw Object.assign(new Error('HubSpot PATCH failed (503)'), { status: 503 });
+  };
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'error');
+  assert.equal(result.retry, true);
+  assert.equal(hubspot.dealLineItems('7').length, 3, 'lines were created');
+  assert.equal(deal().calc_line_items_status, undefined);
+
+  hubspot.failUpdateDeal = null;
+  const retried = await sync.syncDeal('7');
+  assert.equal(retried.outcome, 'unchanged');
+  assert.equal(deal().calc_line_items_status, 'synced');
+  assert.equal(hubspot.dealLineItems('7').length, 3, 'no duplicates on retry');
+});
+
+test('read failures ask to be retried, except for deleted deals', async () => {
+  const { hubspot, sync } = setup();
+  hubspot.getDeal = async () => {
+    const { HubSpotError } = await import('../src/hubspot.js');
+    throw new HubSpotError({ status: 502, method: 'GET', path: '/deals/7', body: 'bad gateway' });
+  };
+  assert.equal((await sync.syncDeal('7')).retry, true);
+  hubspot.getDeal = async () => {
+    const { HubSpotError } = await import('../src/hubspot.js');
+    throw new HubSpotError({ status: 404, method: 'GET', path: '/deals/7', body: { message: 'not found' } });
+  };
+  assert.equal((await sync.syncDeal('7')).retry, false);
+});
+
+test('--force removes stale calculator lines even from a deal with no status', async () => {
+  const { hubspot, sync } = setup({ rooms: '', users: '' });
+  hubspot.addLineItem('7', { calc_line_key: 'hardware:units', hs_product_id: '1', quantity: '3' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'noop');
+  assert.equal(hubspot.dealLineItems('7').length, 1);
+  assert.equal((await sync.syncDeal('7', { force: true })).outcome, 'synced');
+  assert.equal(hubspot.dealLineItems('7').length, 0);
+});
+
+test('a fingerprint in an older format means every line is re-checked', async () => {
+  const { hubspot, sync, deal } = setup();
+  await sync.syncDeal('7');
+  hubspot.deals.get('7').properties.calc_line_items_fingerprint = '0123456789abcdef0123456789abcdef';
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'unchanged');
+  assert.match(deal().calc_line_items_fingerprint, /^v2;/);
+  assert.equal(hubspot.dealLineItems('7').length, 3);
 });

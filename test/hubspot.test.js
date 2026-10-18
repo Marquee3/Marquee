@@ -20,7 +20,7 @@ test('sends the token and reads a deal with the requested properties', async () 
   const deal = await clientWith(fetch).getDeal('7', ['dealname', 'amount']);
   assert.equal(deal.id, '7');
   assert.equal(requests[0].headers.authorization, 'Bearer pat-123');
-  assert.equal(requests[0].url.pathname, '/crm/v3/objects/deals/7');
+  assert.equal(requests[0].url.pathname, '/crm/objects/2026-09/deals/7');
   assert.equal(requests[0].url.searchParams.get('properties'), 'dealname,amount');
 });
 
@@ -35,7 +35,7 @@ test('does not retry client errors and reports HubSpot\'s message', async () => 
   await assert.rejects(clientWith(fetch).updateDeal('7', { x: 1 }), (err) => {
     assert.ok(err instanceof HubSpotError);
     assert.equal(err.status, 400);
-    assert.match(err.message, /PATCH \/crm\/v3\/objects\/deals\/7 failed \(400\): Property values were not valid/);
+    assert.match(err.message, /PATCH \/crm\/objects\/2026-09\/deals\/7 failed \(400\): Property values were not valid/);
     return true;
   });
   assert.equal(requests.length, 1);
@@ -56,15 +56,53 @@ test('batch partial failures (207) are errors', async () => {
   await assert.rejects(clientWith(fetch).createLineItems('7', [{}, {}]), /calc_line_key/);
 });
 
-test('follows association paging', async () => {
+test('reads associations with the batch endpoint and follows its paging', async () => {
   const { fetch, requests } = fakeFetch((req) =>
-    req.url.searchParams.get('after')
-      ? { body: { results: [{ toObjectId: 3 }] } }
-      : { body: { results: [{ toObjectId: 1 }, { toObjectId: 2 }], paging: { next: { after: 'abc' } } } },
+    req.body.inputs[0].after
+      ? { body: { results: [{ from: { id: '7' }, to: [{ toObjectId: 3 }] }] } }
+      : { body: { results: [{ from: { id: '7' }, to: [{ toObjectId: 1 }, { toObjectId: 2 }], paging: { next: { after: 'abc' } } }] } },
   );
   const ids = await clientWith(fetch).getAssociatedIds('deals', '7', 'line_items');
   assert.deepEqual(ids, ['1', '2', '3']);
-  assert.equal(requests[0].url.pathname, '/crm/v4/objects/deals/7/associations/line_items');
+  assert.equal(requests[0].method, 'POST');
+  assert.equal(requests[0].url.pathname, '/crm/associations/2026-09/deals/line_items/batch/read');
+  assert.deepEqual(requests[0].body, { inputs: [{ id: '7' }] });
+  assert.deepEqual(requests[1].body, { inputs: [{ id: '7', after: 'abc' }] });
+});
+
+test('a deal with no associations has no results entry', async () => {
+  const { fetch } = fakeFetch(() => ({ body: { results: [] } }));
+  assert.deepEqual(await clientWith(fetch).getAssociatedIds('deals', '7', 'quotes', { max: 1 }), []);
+});
+
+test('uses date-based API paths, or the numbered ones with apiVersion "legacy"', async () => {
+  const seen = [];
+  for (const apiVersion of ['2026-09', '2027-03', 'legacy']) {
+    const { fetch, requests } = fakeFetch(() => ({ body: { results: [] } }));
+    const client = new HubSpotClient({ accessToken: 't', apiVersion, fetch, sleep: async () => {} });
+    await client.getDeal('7', ['dealname']);
+    await client.readLineItems(['1'], ['quantity']);
+    await client.getAssociatedIds('deals', '7', 'line_items');
+    await client.getProperties('deals');
+    await client.searchDeals({ filterGroups: [], properties: [] });
+    seen.push(requests.map((r) => r.url.pathname));
+  }
+  assert.deepEqual(seen[0], [
+    '/crm/objects/2026-09/deals/7',
+    '/crm/objects/2026-09/line_items/batch/read',
+    '/crm/associations/2026-09/deals/line_items/batch/read',
+    '/crm/properties/2026-09/deals',
+    '/crm/objects/2026-09/deals/search',
+  ]);
+  assert.equal(seen[1][0], '/crm/objects/2027-03/deals/7');
+  assert.deepEqual(seen[2], [
+    '/crm/v3/objects/deals/7',
+    '/crm/v3/objects/line_items/batch/read',
+    '/crm/v4/associations/deals/line_items/batch/read',
+    '/crm/v3/properties/deals',
+    '/crm/v3/objects/deals/search',
+  ]);
+  assert.throws(() => new HubSpotClient({ accessToken: 't', apiVersion: 'v3' }), /HUBSPOT_API_VERSION must look like 2026-09/);
 });
 
 test('searches products by SKU, 5 per request', async () => {
@@ -81,16 +119,12 @@ test('archive returns nothing (204)', async () => {
   assert.deepEqual(requests[0].body, { inputs: [{ id: '1' }, { id: '2' }] });
 });
 
-test('searches deals modified since a time, oldest first', async () => {
+test('searches deals with the given filters', async () => {
   const { fetch, requests } = fakeFetch(() => ({ body: { results: [{ id: '1' }], paging: { next: { after: '200' } } } }));
-  const page = await clientWith(fetch).searchDealsModifiedSince(1760000000000, ['seats'], { after: '0', limit: 200 });
+  const filterGroups = [{ filters: [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: '1760000000000' }] }];
+  const sorts = [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }];
+  const page = await clientWith(fetch).searchDeals({ filterGroups, sorts, properties: ['seats'], after: '0' });
   assert.deepEqual(page, { results: [{ id: '1' }], after: '200' });
-  assert.equal(requests[0].url.pathname, '/crm/v3/objects/deals/search');
-  assert.deepEqual(requests[0].body, {
-    filterGroups: [{ filters: [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: '1760000000000' }] }],
-    sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
-    properties: ['seats'],
-    limit: 200,
-    after: '0',
-  });
+  assert.equal(requests[0].url.pathname, '/crm/objects/2026-09/deals/search');
+  assert.deepEqual(requests[0].body, { filterGroups, sorts, properties: ['seats'], limit: 200, after: '0' });
 });

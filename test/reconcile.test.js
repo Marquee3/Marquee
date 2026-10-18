@@ -92,3 +92,29 @@ test('new line item properties', () => {
     hs_line_item_currency_code: 'GBP',
   });
 });
+
+test('lines from calculators not in the config are orphans, never touched', () => {
+  const existing = [
+    item(5, { calc_line_key: 'gone:a', hs_product_id: '1' }),
+    item(6, { calc_line_key: 'gone:a', hs_product_id: '1' }),
+    item(7, { calc_line_key: 'm:a', hs_product_id: '1', quantity: '1', hs_position_on_quote: '0' }),
+  ];
+  const plan = planReconciliation([line('m:a')], existing, { calculatorIds: new Set(['m']) });
+  assert.deepEqual(plan.orphans, [{ id: '5', key: 'gone:a' }, { id: '6', key: 'gone:a' }]);
+  assert.deepEqual(plan.archive, [], 'not even their duplicates');
+  assert.deepEqual(findDuplicates(existing, { calculatorIds: new Set(['m']) }), []);
+});
+
+test('scope: unchanged lines are kept as the team left them', () => {
+  const existing = [
+    item(5, { calc_line_key: 'm:a', hs_product_id: '1', quantity: '9', hs_position_on_quote: '0' }),
+    item(6, { calc_line_key: 'm:b', hs_product_id: '1', quantity: '1', hs_position_on_quote: '1' }),
+    item(7, { calc_line_key: 'm:old', hs_product_id: '1' }),
+  ];
+  const desired = [line('m:a', { quantity: 2 }), line('m:b', { quantity: 3, position: 1 }), line('m:deleted-by-team', { position: 2 })];
+  const plan = planReconciliation(desired, existing, { calculatorIds: new Set(['m']), scope: new Set(['m:b']) });
+  assert.deepEqual(plan.keep, [{ id: '5', key: 'm:a' }], 'a was hand-edited to 9 and its output did not change');
+  assert.deepEqual(plan.update.map((u) => [u.key, u.properties]), [['m:b', { quantity: '3' }]]);
+  assert.deepEqual(plan.create, [], 'a line the team deleted is not recreated unless its output changes');
+  assert.deepEqual(plan.archive, [{ id: '7', key: 'm:old', reason: 'no longer in calculator output' }]);
+});

@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
-import { evaluateCalculators } from './calculators.js';
-import { ExpressionError, normalizeValues, truthy } from './expression.js';
+import { HubSpotError } from './hubspot.js';
+import { silentLogger } from './logger.js';
 import { DEAL, STATUS } from './properties.js';
 import {
   LINE_ITEM_READ_PROPERTIES,
@@ -9,10 +8,18 @@ import {
   planReconciliation,
   toLineItemProperties,
 } from './reconcile.js';
-import { silentLogger } from './logger.js';
-
-const MAX_MESSAGE_LENGTH = 2000;
-const REVIEW_HINT = 'Review them, then create the quote.';
+import {
+  MESSAGES,
+  REVIEW_HINT,
+  changedKeys,
+  formatFingerprint,
+  lineFingerprints,
+  parseFingerprint,
+  sameText,
+  triage,
+  triageProperties,
+  truncate,
+} from './triage.js';
 
 /**
  * Brings a deal's calculator line items in line with its calculator output.
@@ -23,6 +30,9 @@ const REVIEW_HINT = 'Review them, then create the quote.';
  *   skipped    the deal is frozen, already has a quote, or fails settings.syncWhen
  *   noop       no calculator applies and the app has never touched the deal
  *   error      nothing (or not everything) could be applied; see message
+ *
+ * A result with retry: true failed for a reason that may pass (HubSpot
+ * unavailable, rate limited) and should be tried again later.
  */
 export class LineItemSync {
   constructor({ hubspot, config, products, logger = silentLogger, now = () => new Date() }) {
@@ -31,15 +41,18 @@ export class LineItemSync {
     this.products = products;
     this.logger = logger;
     this.now = now;
+    this.calculatorIds = new Set(config.calculators.map((calc) => calc.id));
   }
 
   async syncDeal(dealId, { dryRun = false, force = false } = {}) {
     dealId = String(dealId);
     let deal;
     try {
-      deal = await this.hubspot.getDeal(dealId, this.#dealPropertiesToRead());
+      deal = await this.hubspot.getDeal(dealId, triageProperties(this.config).concat('deal_currency_code'));
     } catch (err) {
-      return this.#log({ dealId, outcome: 'error', message: `Could not read deal: ${describeError(err)}` });
+      // A deleted deal (404) is not worth retrying.
+      const retry = !(err instanceof HubSpotError && err.status === 404);
+      return this.#log({ dealId, outcome: 'error', message: `Could not read deal: ${describeError(err)}`, retry });
     }
 
     try {
@@ -47,102 +60,88 @@ export class LineItemSync {
     } catch (err) {
       const message = `Line items may be only partly updated: ${describeError(err)}`;
       await this.#writeStatus(deal, { status: STATUS.error, message }, dryRun);
-      return this.#log({ dealId, outcome: 'error', message, dryRun });
+      return this.#log({ dealId, outcome: 'error', message, dryRun, retry: isTransient(err) });
     }
   }
 
   async #sync(deal, { dryRun, force }) {
     const dealId = String(deal.id);
     const properties = deal.properties ?? {};
-    const values = normalizeValues(properties);
     const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
+    const status = async (outcome, statusValue, message, extra = {}, fingerprint) => {
+      const written = await this.#writeStatus(deal, { status: statusValue, message, fingerprint }, dryRun);
+      // If line items changed but the status couldn't be recorded, try again
+      // later: until it is, the deal doesn't show it has calculator lines.
+      if (!written && extra.changed) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
+      return result(outcome, message, extra);
+    };
 
-    const { syncWhen, skipWhenQuoteExists, setLineOrder } = this.config.settings;
-    let inScope = true;
-    try {
-      inScope = !syncWhen || truthy(syncWhen.evaluate(values));
-    } catch (err) {
-      if (!(err instanceof ExpressionError)) throw err;
-      const message = `Line items were not changed: settings.syncWhen: ${err.message}`;
-      await this.#writeStatus(deal, { status: STATUS.error, message }, dryRun);
-      return result('error', message);
-    }
-    if (!inScope) {
+    // 1. Decide from the deal's own properties (the poller does the same).
+    const t = triage(this.config, properties);
+    if (t.reason === 'syncWhen') {
       // Not written to the deal: syncWhen typically excludes most deals
       // (e.g. closed ones) and a status on each would just be noise.
       return result('skipped', 'Deal does not match settings.syncWhen.');
     }
+    if (t.reason === 'syncWhenError') return status('error', STATUS.error, t.syncWhenError);
+    if (t.reason === 'noop' && !force) return result('noop', 'No calculator applies to this deal.', { desired: [] });
+    if (t.reason === 'frozen') return status('skipped', STATUS.skipped, MESSAGES.frozen);
 
-    // 1. Work out the line items the deal should have.
-    const evaluation = evaluateCalculators(this.config, properties);
-    if (!evaluation.lines.length && !evaluation.errors.length && !properties[DEAL.fingerprint] && !properties[DEAL.status]) {
-      // No calculator applies and the app has never touched this deal (it
-      // always leaves a status), so there can't be any of its lines to remove.
-      return result('noop', 'No calculator applies to this deal.', { desired: [] });
+    const { evaluation } = t;
+    if (evaluation.errors.length) {
+      return status('error', STATUS.error, MESSAGES.inputErrors(evaluation.errors), { errors: evaluation.errors });
     }
 
-    if (truthy(values[DEAL.frozen])) {
-      const message = 'Line items are frozen on this deal, so they were not updated. Untick "Calculator line items: freeze" to re-sync them.';
-      await this.#writeStatus(deal, { status: STATUS.skipped, message }, dryRun);
-      return result('skipped', message);
-    }
-
+    // 2. Resolve products and work out the line items the deal should have.
     const skus = evaluation.lines.filter((line) => line.product.sku).map((line) => line.product.sku);
     const { products, errors: productErrors } = skus.length
       ? await this.products.resolve(skus)
       : { products: new Map(), errors: [] };
-    const errors = [...evaluation.errors, ...productErrors];
-    if (errors.length) {
-      const message = `Line items were not changed because the calculator output couldn't be turned into line items:\n• ${errors.join('\n• ')}`;
-      await this.#writeStatus(deal, { status: STATUS.error, message }, dryRun);
-      return result('error', message, { errors });
+    if (productErrors.length) {
+      return status('error', STATUS.error, MESSAGES.inputErrors(productErrors), { errors: productErrors });
     }
-
+    const { setLineOrder, skipWhenQuoteExists } = this.config.settings;
     const desired = evaluation.lines.map((line, index) => ({
       ...line,
       productId: line.product.id ?? products.get(line.product.sku).id,
       position: setLineOrder ? index : null,
     }));
-    const fingerprint = fingerprintOf(desired);
+    // (Triage skips this for deals it can rule out early, which --force overrides.)
+    const fingerprints = t.fingerprints ?? lineFingerprints(evaluation.lines);
+    const stored = t.stored ?? parseFingerprint(properties[DEAL.fingerprint]);
+    const fingerprint = formatFingerprint(fingerprints);
 
-    // 2. Nothing to do if the calculator output is what was last applied.
-    // This also leaves the team's manual edits alone when an unrelated
-    // property change triggers a sync.
-    if (!force && fingerprint === properties[DEAL.fingerprint]) {
-      if (properties[DEAL.status] !== STATUS.synced) {
-        await this.#writeStatus(deal, { status: STATUS.synced, message: `Line items already match the calculator. ${REVIEW_HINT}`, fingerprint }, dryRun);
-      }
+    // 3. Nothing to do if every line is what was last applied. This leaves
+    // the team's edits alone when something unrelated changes on the deal.
+    if (!force && t.reason === 'unchanged') {
       return result('unchanged', 'Calculator output is unchanged since the last sync.', { desired });
     }
-
-    // 3. Compare with the deal's current line items.
-    const existing = await this.#readLineItems(dealId);
-    const plan = planReconciliation(desired, existing);
-
-    if (isEmptyPlan(plan)) {
-      const message = desired.length
-        ? `Line items already match the calculator. ${REVIEW_HINT}`
-        : 'No calculator applies to this deal, so it has no calculator line items.';
-      await this.#writeStatus(deal, { status: STATUS.synced, message, fingerprint }, dryRun);
-      return result('unchanged', message, { desired, plan });
+    if (!force && stored && changedKeys(stored, fingerprints).size === 0) {
+      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired }, fingerprint);
     }
 
-    // 4. Don't change line items under a quote the team has already built.
+    // 4. Compare with the deal's current line items. Only lines whose
+    // calculated values changed are re-applied (all of them when forced, or
+    // when there's no usable fingerprint from an earlier sync).
+    const scope = force || !stored ? null : changedKeys(stored, fingerprints);
+    const existing = await this.#readLineItems(dealId);
+    const plan = planReconciliation(desired, existing, { calculatorIds: this.calculatorIds, scope });
+
+    if (isEmptyPlan(plan)) {
+      const message = desired.length ? MESSAGES.alreadyMatch : MESSAGES.noCalculator;
+      return status('unchanged', STATUS.synced, message, { desired, plan }, fingerprint);
+    }
+
+    // 5. Don't change line items under a quote the team has already built.
     if (skipWhenQuoteExists) {
       const quotes = await this.hubspot.getAssociatedIds('deals', dealId, 'quotes', { max: 1 });
-      if (quotes.length) {
-        const message =
-          'The calculator output changed, but this deal already has a quote, so its line items were left as they are. ' +
-          'Update them by hand, or delete the quote and then tick and untick "Calculator line items: freeze" to re-sync.';
-        await this.#writeStatus(deal, { status: STATUS.skipped, message }, dryRun);
-        return result('skipped', message, { desired, plan });
-      }
+      if (quotes.length) return status('skipped', STATUS.skipped, MESSAGES.quote, { desired, plan });
     }
 
     const calculatorNames = this.#calculatorNames(plan);
     if (dryRun) return result('synced', describePlan(plan, calculatorNames), { desired, plan });
 
-    // 5. Apply.
+    // 6. Apply.
     if (plan.archive.length) await this.hubspot.archiveLineItems(plan.archive.map((item) => item.id));
     if (plan.update.length) await this.hubspot.updateLineItems(plan.update);
     let duplicatesRemoved = 0;
@@ -152,7 +151,7 @@ export class LineItemSync {
       // If another sync of this deal ran at the same moment (a second server
       // instance, or a retried request that had in fact succeeded), both may
       // have created the same lines. Re-read and keep one of each.
-      const duplicates = findDuplicates(await this.#readLineItems(dealId));
+      const duplicates = findDuplicates(await this.#readLineItems(dealId), { calculatorIds: this.calculatorIds });
       if (duplicates.length) {
         await this.hubspot.archiveLineItems(duplicates.map((item) => item.id));
         duplicatesRemoved = duplicates.length;
@@ -160,8 +159,7 @@ export class LineItemSync {
     }
 
     const message = describePlan(plan, calculatorNames, duplicatesRemoved);
-    await this.#writeStatus(deal, { status: STATUS.synced, message, fingerprint }, dryRun);
-    return result('synced', message, { desired, plan, duplicatesRemoved });
+    return status('synced', STATUS.synced, message, { desired, plan, duplicatesRemoved, changed: true }, fingerprint);
   }
 
   async #readLineItems(dealId) {
@@ -169,9 +167,10 @@ export class LineItemSync {
     return ids.length ? this.hubspot.readLineItems(ids, LINE_ITEM_READ_PROPERTIES) : [];
   }
 
+  /** Write the sync status to the deal. Returns false if the write failed. */
   async #writeStatus(deal, { status, message, fingerprint }, dryRun) {
-    if (dryRun) return;
-    // An error clears the fingerprint so the next trigger retries in full.
+    if (dryRun) return true;
+    // An error clears the fingerprint so the next sync re-checks every line.
     if (status === STATUS.error) fingerprint = '';
     const text = truncate(message);
 
@@ -181,7 +180,7 @@ export class LineItemSync {
     const current = deal.properties ?? {};
     const sameStatus = current[DEAL.status] === status && sameText(current[DEAL.message], text);
     const sameFingerprint = fingerprint === undefined || (current[DEAL.fingerprint] ?? '') === fingerprint;
-    if (sameStatus && sameFingerprint) return;
+    if (sameStatus && sameFingerprint) return true;
 
     const properties = {
       [DEAL.status]: status,
@@ -191,8 +190,10 @@ export class LineItemSync {
     if (fingerprint !== undefined) properties[DEAL.fingerprint] = fingerprint;
     try {
       await this.hubspot.updateDeal(deal.id, properties);
+      return true;
     } catch (err) {
       this.logger.error('could not write sync status to deal', { dealId: deal.id, error: describeError(err) });
+      return false;
     }
   }
 
@@ -202,30 +203,12 @@ export class LineItemSync {
     return this.config.calculators.filter((calc) => ids.has(calc.id)).map((calc) => calc.name);
   }
 
-  #dealPropertiesToRead() {
-    return [...new Set([...this.config.dealProperties, ...Object.values(DEAL), 'deal_currency_code'])];
-  }
-
   #log(result) {
-    const { dealId, outcome, message, dryRun } = result;
+    const { dealId, outcome, message, dryRun, retry } = result;
     const level = outcome === 'error' ? 'error' : 'info';
-    this.logger[level]('deal sync', { dealId, outcome, dryRun: dryRun || undefined, message });
+    this.logger[level]('deal sync', { dealId, outcome, dryRun: dryRun || undefined, retry: retry || undefined, message });
     return result;
   }
-}
-
-/** Stable fingerprint of the line items a deal should have. */
-export function fingerprintOf(desired) {
-  const canonical = desired.map((line) => [
-    line.key,
-    String(line.productId),
-    line.quantity,
-    line.price,
-    line.name,
-    line.description,
-    line.position,
-  ]);
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 32);
 }
 
 function describePlan(plan, calculatorNames, duplicatesRemoved = 0) {
@@ -243,22 +226,19 @@ function describePlan(plan, calculatorNames, duplicatesRemoved = 0) {
   return `${summary}${from}.${dupes} ${REVIEW_HINT}`;
 }
 
+// Worth retrying: rate limits, HubSpot outages and network failures.
+function isTransient(err) {
+  if (err instanceof HubSpotError) return err.status === 429 || err.status >= 500;
+  const detail = `${err?.message ?? ''} ${err?.cause?.code ?? ''}`;
+  return /fetch failed|network|socket|terminated|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(detail);
+}
+
 function describeError(err) {
   const message = err?.message ?? String(err);
   if (/calc_line|PROPERTY_DOESNT_EXIST|does not exist/i.test(message)) {
     return `${message} (have the app's custom properties been created? Run "npm run setup".)`;
   }
   return message;
-}
-
-// HubSpot may normalise whitespace in stored text, so compare loosely.
-function sameText(a, b) {
-  const normalize = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-  return normalize(a) === normalize(b);
-}
-
-function truncate(text) {
-  return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH - 1)}…` : text;
 }
 
 function joinList(items) {

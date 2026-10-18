@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { loadConfig } from '../src/config.js';
+import { loadConfig } from '../src/config-loader.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const tempDirs = [];
@@ -27,6 +27,7 @@ async function cli(args, configDir) {
 async function emptyConfig() {
   const dir = await mkdtemp(join(tmpdir(), 'calc-cli-'));
   tempDirs.push(dir);
+  await mkdir(join(dir, 'calculators'));
   return dir;
 }
 
@@ -48,7 +49,6 @@ test('new-calculator creates a starter file that check then validates', async ()
 
 test('new-calculator refuses duplicates and bad ids', async () => {
   const dir = await emptyConfig();
-  await mkdir(join(dir, 'calculators'));
   await writeFile(join(dir, 'calculators', 'other-name.json'), JSON.stringify({ id: 'training', lineItems: [{ key: 'a', product: { id: '1' }, quantity: 1 }] }));
   assert.match((await cli(['new-calculator', 'training'], dir)).stdout, /already exists/);
   assert.match((await cli(['new-calculator', 'no spaces'], dir)).stdout, /must be letters, numbers/);
@@ -59,4 +59,19 @@ test('check with no calculators explains how to add one', async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /No calculators yet/);
   assert.match(result.stdout, /new-calculator/);
+});
+
+test('check fails clearly when the calculators folder is missing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'calc-cli-'));
+  tempDirs.push(dir);
+  const result = await cli(['check'], dir);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /calculators folder not found/);
+});
+
+test('check warns about a calculator that applies to every deal', async () => {
+  const dir = await emptyConfig();
+  await writeFile(join(dir, 'calculators', 'fee.json'), JSON.stringify({ id: 'fee', lineItems: [{ key: 'setup', product: { id: '1' }, quantity: 1 }] }));
+  const result = await cli(['check'], dir);
+  assert.match(result.stdout, /fee adds line items to every deal/);
 });
