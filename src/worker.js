@@ -22,8 +22,9 @@ import { dealIdsFromEvents, dealIdsFromSyncRequest, verifySignatureV3 } from './
 const DEFAULTS = {
   // Each cron run looks back this far. Being stateless, it must cover the
   // gap between runs plus HubSpot's search index lag; deals already synced
-  // are skipped without further API calls.
-  windowMinutes: 5,
+  // are skipped without further API calls. Kept short because a deal still
+  // waiting in the queue is sent again by each run whose window it's in.
+  windowMinutes: 3,
   // Every 30 minutes, look back further, to catch anything missed while
   // cron runs were delayed or failing. 65 minutes means every moment is
   // covered by two catch-ups, so one failed catch-up leaves no gap.

@@ -176,3 +176,44 @@ test('a failed search leaves the window where it was', async () => {
   const sinces = searches().map(since);
   assert.equal(sinces[2], sinces[1]);
 });
+
+test('a capped sweep never moves the window past deals still in their quiet period', async () => {
+  // A bulk change: 250 deals changed in the last 3 seconds, quiet period 5 s,
+  // and only one page per sweep.
+  const deals = {};
+  for (let i = 1; i <= 250; i++) deals[i] = { hs_lastmodifieddate: iso(T0 - 3000 + i * 10), seats: '1' };
+  const { poller, enqueued, tick } = setup(deals, { maxPages: 1, quietMs: 5000 });
+  await poller.sweep();
+  assert.deepEqual(enqueued, [], 'all still quiet');
+  for (let i = 0; i < 3; i++) {
+    tick(MINUTE);
+    await poller.sweep();
+  }
+  assert.equal(new Set(enqueued).size, 250);
+});
+
+test('a quiet period longer than the overlap still lets deals through', async () => {
+  const { hubspot, poller, enqueued, tick, setClock } = setup(
+    { a: { hs_lastmodifieddate: iso(T0 - 10_000), seats: '1' }, b: { hs_lastmodifieddate: iso(T0), other: 'x' } },
+    { quietMs: 150_000 },
+  );
+  for (let i = 0; i <= 5; i++) {
+    setClock(T0 + i * MINUTE);
+    hubspot.editDeal('b', { other: String(i) }); // the account keeps changing
+    await poller.sweep();
+  }
+  assert.deepEqual(enqueued, ['a']);
+  tick(0);
+});
+
+test('a retry is queued once per failure, so the queue\'s timer can run', async () => {
+  const { poller, enqueued } = setup({});
+  poller.handleResult('9', { outcome: 'error', retry: true });
+  await poller.sweep();
+  await poller.sweep();
+  await poller.sweep();
+  assert.deepEqual(enqueued, ['9'], 'not re-queued while the retry is pending');
+  poller.handleResult('9', { outcome: 'error', retry: true });
+  await poller.sweep();
+  assert.deepEqual(enqueued, ['9', '9'], 'queued again after the next failure');
+});

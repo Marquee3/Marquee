@@ -117,7 +117,7 @@ test('catch-up runs look further back; deals needing attention are re-checked on
 test('a cron run that fails part-way keeps the deals it already queued', async () => {
   const { worker, env, sent, hubspot, now } = setup({ env: { SYNC_MAX_PAGES_PER_RUN: '5' } });
   for (let i = 1; i <= 450; i++) {
-    hubspot.deals.set(String(i), { id: String(i), properties: { seats: '1', hs_lastmodifieddate: new Date(now() - 4 * 60_000 + i * 100).toISOString() } });
+    hubspot.deals.set(String(i), { id: String(i), properties: { seats: '1', hs_lastmodifieddate: new Date(now() - 150_000 + i * 100).toISOString() } });
   }
   let pages = 0;
   hubspot.beforeSearchPage = () => {

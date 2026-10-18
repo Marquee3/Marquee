@@ -107,7 +107,7 @@ export class LineItemSync {
     // Nothing to do if every line is what was last applied (decided before
     // any API call). This leaves the team's edits alone when something
     // unrelated changes on the deal.
-    if (!force && (t.reason === 'unchanged' || t.reason === 'quote')) {
+    if (!force && !dryRun && (t.reason === 'unchanged' || t.reason === 'quote')) {
       const message = t.reason === 'quote' ? MESSAGES.quote : 'Calculator output is unchanged since the last sync.';
       return result(t.reason === 'quote' ? 'skipped' : 'unchanged', message, { desired: evaluation.lines });
     }
@@ -137,7 +137,7 @@ export class LineItemSync {
 
     // 3. Every line already matches what was last applied (the status just
     // needs to say so, e.g. after an error was fixed).
-    if (!force && stored && changedKeys(stored, fingerprints).size === 0) {
+    if (!force && !dryRun && stored && changedKeys(stored, fingerprints).size === 0) {
       return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired }, fingerprint);
     }
 
@@ -149,6 +149,8 @@ export class LineItemSync {
     const plan = planReconciliation(desired, existing, { calculatorIds: this.calculatorIds, scope });
 
     if (isEmptyPlan(plan)) {
+      // A forced sync of a deal the service doesn't manage leaves no trace.
+      if (t.reason === 'noop') return result('noop', 'No calculator applies to this deal.', { desired, plan });
       const message = desired.length
         ? MESSAGES.alreadyMatch
         : plan.orphans.length

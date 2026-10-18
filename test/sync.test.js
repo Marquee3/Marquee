@@ -585,3 +585,22 @@ test('a deal held back by a quote is not re-checked until its output changes', a
   assert.equal((await sync.syncDeal('7')).outcome, 'synced');
   assert.equal(seatsQty(hubspot), '130');
 });
+
+test('a forced sync of a deal no calculator applies to writes nothing', async () => {
+  const { hubspot, sync } = setup({ rooms: '', users: '' });
+  assert.equal((await sync.syncDeal('7', { force: true })).outcome, 'noop');
+  assert.equal(hubspot.count('updateDeal'), 0);
+});
+
+test('plan (a dry run) lists lines from removed calculators even after later syncs', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  const config = structuredClone(CONFIG);
+  config.calculators = config.calculators.filter((c) => c.id !== 'licences');
+  const without = new LineItemSync({ hubspot, config: parseConfig(config), products: new ProductResolver(hubspot) });
+  hubspot.deals.get('7').properties.rooms = '7';
+  await without.syncDeal('7');
+  const plan = await without.syncDeal('7', { dryRun: true });
+  assert.deepEqual(plan.plan.orphans.map((o) => o.key), ['licences:seats']);
+  assert.equal(plan.outcome, 'unchanged');
+});

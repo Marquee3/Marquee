@@ -26,9 +26,10 @@
   //   HUBSPOT_ACCESS_TOKEN   required
   //   HUBSPOT_CLIENT_SECRET  only for webhooks
   //   SYNC_API_KEY           only for POST /sync
-  "vars": {
-    "HUBSPOT_API_VERSION": "2026-09"
-  },
+  // Optional settings (README > Deploy to Cloudflare) go in "vars" here or
+  // in the dashboard. The HubSpot API version defaults to the one in
+  // src/hubspot.js; only set HUBSPOT_API_VERSION to override it.
+  "vars": {},
   // Keep settings added in the Cloudflare dashboard when deploying.
   "keep_vars": true,
 

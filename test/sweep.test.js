@@ -76,3 +76,23 @@ test('backfill with skipTriage passes every deal on (for --force)', async () => 
   assert.deepEqual(normal, []);
   assert.deepEqual(forced, ['1', '2', '3']);
 });
+
+test('error re-check looks at the most recently changed deals first', async () => {
+  const hubspot = new FakeHubSpot();
+  const old = Date.parse('2026-01-01T00:00:00Z');
+  for (let i = 1; i <= 250; i++) {
+    hubspot.deals.set(String(i), { id: String(i), properties: { calc_line_items_status: 'error', p1: '1', hs_lastmodifieddate: new Date(old + i).toISOString() } });
+  }
+  hubspot.deals.set('9999', { id: '9999', properties: { calc_line_items_status: 'error', p1: '1', hs_lastmodifieddate: new Date().toISOString() } });
+  const found = [];
+  await findErrorDeals({ hubspot, config: CONFIG, maxPages: 1, onDeal: (id) => found.push(id) });
+  assert.equal(found[0], '9999');
+});
+
+test('forced backfill still skips deals no calculator applies to', async () => {
+  const config = parseConfig({ calculators: [{ id: 'c', appliesWhen: 'p1 > 5', lineItems: [{ key: 'x', product: { id: '1' }, quantity: 1 }] }] });
+  const hubspot = hubspotWith(2, (i) => ({ p1: i === 1 ? '1' : '9' }));
+  const found = [];
+  await findDealsWithInputs({ hubspot, config, inputProperties: ['p1'], skipTriage: true, onDeal: (id) => found.push(id) });
+  assert.deepEqual(found, ['2']);
+});

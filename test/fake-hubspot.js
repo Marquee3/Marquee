@@ -71,7 +71,8 @@ export class FakeHubSpot {
       filterGroups.some((group) => group.filters.every((filter) => matchFilter(deal, filter))),
     );
     const sortBy = sorts?.[0]?.propertyName ?? 'hs_object_id';
-    matches.sort((a, b) => sortValue(a, sortBy) - sortValue(b, sortBy));
+    const direction = sorts?.[0]?.direction === 'DESCENDING' ? -1 : 1;
+    matches.sort((a, b) => direction * (sortValue(a, sortBy) - sortValue(b, sortBy)));
     const start = Number(after ?? 0);
     const page = matches.slice(start, start + limit);
     return {

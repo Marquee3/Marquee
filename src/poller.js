@@ -24,6 +24,7 @@ export class DealPoller {
   #since = null;
   #seen = new Map(); // dealId -> hs_lastmodifieddate already queued
   #retries = new Map(); // dealId -> attempts so far
+  #retryQueued = new Set(); // retries already handed to the queue, awaiting a result
   #sweeps = 0;
   #timer = null;
   #stopped = false;
@@ -79,6 +80,7 @@ export class DealPoller {
    * failed for a reason that may pass (see `retry` in LineItemSync results).
    */
   retryLater(dealId) {
+    this.#retryQueued.delete(String(dealId));
     const attempts = (this.#retries.get(String(dealId)) ?? 0) + 1;
     if (attempts > MAX_RETRIES) {
       this.#retries.delete(String(dealId));
@@ -94,9 +96,12 @@ export class DealPoller {
     this.#since ??= startedAt - this.#lookbackMs;
     this.#sweeps++;
 
-    // Retries first, so a failed sweep doesn't drop them.
-    const retrying = [...this.#retries.keys()];
+    // Retries first, so a failed sweep doesn't drop them. Each is queued
+    // once per failure: re-queuing every sweep would keep resetting the
+    // queue's quiet-period timer, so it might never run.
+    const retrying = [...this.#retries.keys()].filter((id) => !this.#retryQueued.has(id));
     for (const id of retrying) {
+      this.#retryQueued.add(id);
       this.#seen.delete(id);
       this.#queue.enqueue(id);
     }
@@ -142,6 +147,9 @@ export class DealPoller {
   /** Record a sync outcome: clears or schedules retries. */
   handleResult(dealId, result) {
     if (result?.retry) this.retryLater(dealId);
-    else this.#retries.delete(String(dealId));
+    else {
+      this.#retries.delete(String(dealId));
+      this.#retryQueued.delete(String(dealId));
+    }
   }
 }

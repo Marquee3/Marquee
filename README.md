@@ -22,10 +22,10 @@ project-based app**. It can also run as an ordinary Node.js service
 
 > [!IMPORTANT]
 > **Built for HubSpot's current platform.** Legacy private apps can't be created after
-> 26 October 2026 and go unsupported in September 2027, along with HubSpot's numbered
-> (`/v3/`, `/v4/`) APIs. This service uses a project-based app on developer platform `2026.09`
-> and HubSpot's date-based API `2026-09`, both supported until at least March 2028. See
-> [Staying current](#staying-current).
+> 26 October 2026 and go unsupported in September 2027. HubSpot's numbered APIs go
+> unsupported too: `/v4/` on 30 March 2027 and `/v3/` in September 2027. This service uses a
+> project-based app on developer platform `2026.09` and HubSpot's date-based API `2026-09`,
+> both supported until at least March 2028. See [Staying current](#staying-current).
 
 ## How it works
 
@@ -215,7 +215,9 @@ being cut short.
 - **Requests and queue:** a minute-by-minute check is about 1,440 cron runs a day, plus about
   three Queue operations for each deal synced. That's inside the free plan's 100,000 requests and
   10,000 queue operations a day for up to roughly 3,000 deal syncs a day. A bulk change to many
-  deals can queue some deals more than once while the queue catches up, so it uses more.
+  deals can queue some deals two or three times while the queue catches up, so it uses more; so
+  does a deal stuck on "Needs attention" for a reason outside the deal (about 300 operations a
+  day each, from the 15-minute re-check).
 - **Per run:** the free plan gives each run 10 ms of CPU time and 50 outbound requests. One deal
   sync uses about 5–15 requests, and an ordinary check is a single search. The catch-up checks
   every 30 minutes look back an hour, which in a busy account can be several hundred deals and
@@ -229,8 +231,8 @@ deploys keep what you set there):
 
 | Variable | Default | |
 | --- | --- | --- |
-| `HUBSPOT_API_VERSION` | `2026-09` | HubSpot API version; `legacy` uses the old numbered APIs |
-| `SYNC_POLL_WINDOW_MINUTES` | 5 | How far back each check looks. Keep it at least twice the cron interval, plus 2 |
+| `HUBSPOT_API_VERSION` | from `src/hubspot.js` | Overrides the HubSpot API version; `legacy` uses the old numbered APIs |
+| `SYNC_POLL_WINDOW_MINUTES` | 3 | How far back each check looks. Keep it at least twice the cron interval, plus 1 |
 | `SYNC_CATCH_UP_MINUTES` | 65 | Every 30 minutes, look back this far, to catch anything missed |
 | `SYNC_ERROR_RECHECK_MINUTES` | 15 | How often deals showing "Needs attention" are re-checked |
 | `SYNC_MAX_PAGES_PER_RUN` | 10 | Search pages (200 deals each) per check; more are picked up by later checks |
@@ -238,7 +240,7 @@ deploys keep what you set there):
 | `HUBSPOT_PORTAL_ID` | none | Ignore webhooks from other HubSpot accounts |
 
 To check less often, change the cron in `wrangler.jsonc` (e.g. `*/5 * * * *`) and raise
-`SYNC_POLL_WINDOW_MINUTES` to match (e.g. 12).
+`SYNC_POLL_WINDOW_MINUTES` to match (e.g. 11).
 
 ### 4. Optional: webhooks for instant updates
 
@@ -349,13 +351,15 @@ Formulas refer to deal properties by **internal name**.
 | `POST /sync` | `{"dealId": "123"}` or `{"dealIds": [...]}` or a workflow webhook payload; `Authorization: Bearer <SYNC_API_KEY>`. `?wait=true` syncs up to 3 deals and returns the results (more are queued; failures are queued for retry); `&force=true` re-applies every line |
 
 What runs on its own:
-- **Every minute:** deals changed in the last 5 minutes are triaged from the search results
+- **Every minute:** deals changed in the last 3 minutes are triaged from the search results
   alone. Only those that need a sync go on the queue, so unchanged deals cost nothing beyond the
   search.
 - **Every 30 minutes:** the same check looks back 65 minutes, to catch anything a delayed or
   failed run missed. Every moment is covered by two catch-ups.
-- **Every 15 minutes:** deals showing *Needs attention* are re-checked. Closed deals excluded by
-  `syncWhen`, and inputs that are still wrong, are skipped without being queued.
+- **Every 15 minutes:** deals showing *Needs attention* are re-checked (the 2,000 most recently
+  changed). Closed deals excluded by `syncWhen`, and inputs that are still wrong, are skipped
+  without being queued, so only problems fixed outside the deal (e.g. a product added to the
+  library) cost anything.
 - **When a sync fails** for a temporary reason (HubSpot unavailable, rate limited), the queue
   retries it a minute later, up to 5 times.
 
@@ -384,7 +388,7 @@ stop the minute-by-minute check. Settings are environment variables (see `.env.e
 | `SYNC_API_KEY` | optional | Enables `POST /sync` |
 | `SYNC_DEBOUNCE_MS`, `SYNC_CONCURRENCY` | 5000, 2 | Quiet period; deals synced in parallel |
 | `CONFIG_DIR` | `config` | Folder holding `settings.json` and `calculators/` |
-| `HUBSPOT_API_VERSION` | `2026-09` | As on Cloudflare |
+| `HUBSPOT_API_VERSION` | from `src/hubspot.js` | As on Cloudflare |
 
 A blank value means the default; an invalid one stops the service at startup with a clear error.
 
@@ -394,13 +398,14 @@ Everything that ages is in one place:
 
 | What | Where | Supported until | To update |
 | --- | --- | --- | --- |
-| HubSpot API version | `DEFAULT_API_VERSION` in `src/hubspot.js` (or `HUBSPOT_API_VERSION`) | `2026-09`: at least March 2028 | Set the newer version (new ones ship each March and September), run `npm test`, then `npm run plan` on a test deal |
+| HubSpot API version | `DEFAULT_API_VERSION` in `src/hubspot.js` (unless overridden with `HUBSPOT_API_VERSION`) | `2026-09`: at least March 2028 | Set the newer version (new ones ship each March and September), run `npm test`, then `npm run plan` on a test deal, then deploy |
 | HubSpot developer platform | `platformVersion` in `hubspot-project/hsproject.json` | `2026.09`: about March 2028 | Bump, then `hs project upload` |
 | Cloudflare runtime | `compatibility_date` in `wrangler.jsonc` | Indefinitely: a deployed Worker keeps its behaviour | Optional |
 | Node.js (Node host only) | `Dockerfile` | Node 24: April 2028 | Bump the image |
 
 If HubSpot's new API paths misbehave on your account, setting `HUBSPOT_API_VERSION` to `legacy`
-switches back to the older numbered APIs, which work until September 2027.
+switches back to the older numbered APIs. That's a stop-gap: HubSpot stops supporting the v4
+associations API it uses on 30 March 2027, and the v3 APIs in September 2027.
 
 ## Limitations and things to verify
 

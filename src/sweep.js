@@ -35,7 +35,8 @@ export async function findChangedDeals({ hubspot, config, sinceMs, maxPages = 50
   let scanned = 0;
   let found = 0;
   // Deals at a page-boundary timestamp come back on the next page too.
-  const handled = new Set();
+  // Keyed by version, so a deal changed again while paging is still seen.
+  const handled = new Map();
 
   for (;;) {
     const page = await hubspot.searchDeals({
@@ -53,10 +54,15 @@ export async function findChangedDeals({ hubspot, config, sinceMs, maxPages = 50
       const id = String(deal.id);
       const modified = deal.properties?.hs_lastmodifieddate ?? null;
       const modifiedMs = toMs(modified);
+      // Results are oldest first, so from the first deal still in its quiet
+      // period, every later one is too. Stop there: the cursor then can't
+      // move past deals that haven't been looked at yet.
+      if (Number.isFinite(modifiedMs) && now - modifiedMs < quietMs) {
+        return { scanned, found, cursor: modifiedMs, capped: false };
+      }
       if (Number.isFinite(modifiedMs)) lastMs = modifiedMs;
-      if (Number.isFinite(modifiedMs) && now - modifiedMs < quietMs) continue;
-      if (handled.has(id) || (seen && modified && seen.get(id) === modified)) continue;
-      handled.add(id);
+      if (handled.get(id) === modified || (seen && modified && seen.get(id) === modified)) continue;
+      handled.set(id, modified);
       seen?.set(id, modified);
       if (triage(config, deal.properties ?? {}).action === 'skip') continue;
       found++;
@@ -86,26 +92,35 @@ export async function findChangedDeals({ hubspot, config, sinceMs, maxPages = 50
  * the deal already shows) are skipped, so they aren't re-queued forever.
  */
 export async function findErrorDeals({ hubspot, config, maxPages = 10, onDeal }) {
+  // Most recently changed first, so when there are more than the page
+  // budget covers, it's the old, long-standing ones that wait.
+  const properties = triageProperties(config);
   let found = 0;
-  const result = await searchByObjectId({
-    hubspot,
-    groups: [[{ propertyName: DEAL.status, operator: 'EQ', value: STATUS.error }]],
-    properties: triageProperties(config),
-    maxPages,
-    onDeal: async (deal) => {
-      if (triage(config, deal.properties ?? {}).action === 'skip') return;
+  let after;
+  for (let pages = 0; pages < maxPages; pages++) {
+    const page = await hubspot.searchDeals({
+      filterGroups: [{ filters: [{ propertyName: DEAL.status, operator: 'EQ', value: STATUS.error }] }],
+      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
+      properties,
+      after,
+      limit: PAGE_SIZE,
+    });
+    for (const deal of page.results) {
+      if (triage(config, deal.properties ?? {}).action === 'skip') continue;
       found++;
       await onDeal(String(deal.id));
-    },
-  });
-  return { found, capped: result.capped };
+    }
+    after = page.after;
+    if (!after || !page.results.length) return { found, capped: false };
+  }
+  return { found, capped: true };
 }
 
 /**
  * Deals that have any of `inputProperties` filled in, or that the app has
  * synced before, for backfilling after a calculator is added or changed.
- * With skipTriage (for --force), every deal found is passed on, including
- * those whose lines already match.
+ * With skipTriage (for --force), deals whose lines already match are passed
+ * on as well.
  */
 export async function findDealsWithInputs({ hubspot, config, inputProperties, includeSynced = false, skipTriage = false, maxPages = Infinity, onDeal }) {
   const groups = inputProperties.map((name) => [{ propertyName: name, operator: 'HAS_PROPERTY' }]);
@@ -126,7 +141,10 @@ export async function findDealsWithInputs({ hubspot, config, inputProperties, in
         if (seen.has(String(deal.id))) return;
         seen.add(String(deal.id));
         scanned++;
-        if (!skipTriage && triage(config, deal.properties ?? {}).action === 'skip') return;
+        const t = triage(config, deal.properties ?? {});
+        // Forced, deals whose lines already match are re-applied too; deals
+        // syncWhen excludes, or that no calculator applies to, never are.
+        if (t.action === 'skip' && !(skipTriage && t.reason === 'unchanged')) return;
         found++;
         await onDeal(String(deal.id));
       },

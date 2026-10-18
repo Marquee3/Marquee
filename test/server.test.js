@@ -105,3 +105,9 @@ test('reads deal IDs from the shapes a workflow webhook can send', () => {
   assert.deepEqual(dealIdsFromSyncRequest({ hs_object_id: '9' }), ['9']);
   assert.deepEqual(dealIdsFromSyncRequest({}), []);
 });
+
+test('health lists the loaded calculators', async () => {
+  await withServer({ calculators: ['licences', 'services'] }, async ({ base }) => {
+    assert.deepEqual(await (await fetch(`${base}/health`)).json(), { ok: true, calculators: ['licences', 'services'], pending: 0 });
+  });
+});

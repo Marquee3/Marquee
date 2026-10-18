@@ -19,11 +19,11 @@ const MAX_BODY_BYTES = 1024 * 1024;
  *   POST /sync              sync one or more deals on demand, e.g. from a workflow
  *                           "Send a webhook" action. Requires SYNC_API_KEY.
  */
-export function createServer({ queue, clientSecret, publicUrl, portalId, syncApiKey, allowUnsigned = false, logger }) {
+export function createServer({ queue, calculators = [], clientSecret, publicUrl, portalId, syncApiKey, allowUnsigned = false, logger }) {
   return createHttpServer(async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
     try {
-      if (req.method === 'GET' && path === '/health') return send(res, 200, { ok: true, pending: queue.pending });
+      if (req.method === 'GET' && path === '/health') return send(res, 200, { ok: true, calculators, pending: queue.pending });
 
       if (req.method === 'POST' && path === '/webhooks/hubspot') {
         const rawBody = await readBody(req);
@@ -159,7 +159,7 @@ async function main() {
       logger,
     });
   }
-  const server = createServer({ queue, logger, ...settings });
+  const server = createServer({ queue, logger, calculators: config.calculators.map((c) => c.id), ...settings });
   server.listen(settings.port, () => {
     logger.info('listening', {
       port: settings.port,
