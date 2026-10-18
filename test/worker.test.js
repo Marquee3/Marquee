@@ -98,13 +98,49 @@ test('cron run queues changed deals that need a sync, and skips the rest', async
   assert.deepEqual(sent, []);
 });
 
-test('the hourly cron run looks further back and re-checks deals needing attention', async () => {
+test('catch-up runs look further back; deals needing attention are re-checked on their own minutes', async () => {
   const { worker, env, sent, hubspot } = setup();
   const top = Date.parse('2026-10-18T10:00:00Z');
   hubspot.deals.set('1', { id: '1', properties: { seats: '3', hs_lastmodifieddate: new Date(top - 30 * 60_000).toISOString() } });
-  hubspot.deals.set('2', { id: '2', properties: { calc_line_items_status: 'error', hs_lastmodifieddate: new Date(top - 300 * 60_000).toISOString() } });
-  await worker.scheduled({ scheduledTime: top }, env);
-  assert.deepEqual(sent.map((m) => m.body.dealId).sort(), ['1', '2']);
+  hubspot.deals.set('2', { id: '2', properties: { seats: '3', calc_line_items_status: 'error', hs_lastmodifieddate: new Date(top - 300 * 60_000).toISOString() } });
+  const run = async (minutesPastTen) => {
+    sent.length = 0;
+    await worker.scheduled({ scheduledTime: top + minutesPastTen * 60_000 }, env);
+    return sent.map((m) => m.body.dealId).sort();
+  };
+  assert.deepEqual(await run(0), ['1'], ':00 is a catch-up (65 minutes back)');
+  assert.deepEqual(await run(7), [], 'an ordinary run looks back 5 minutes');
+  assert.deepEqual(await run(14), ['2'], 'the error re-check runs at :14, :29, :44, :59');
+  assert.deepEqual(await run(30), ['1'], ':30 is a catch-up too');
+});
+
+test('a cron run that fails part-way keeps the deals it already queued', async () => {
+  const { worker, env, sent, hubspot, now } = setup({ env: { SYNC_MAX_PAGES_PER_RUN: '5' } });
+  for (let i = 1; i <= 450; i++) {
+    hubspot.deals.set(String(i), { id: String(i), properties: { seats: '1', hs_lastmodifieddate: new Date(now() - 4 * 60_000 + i * 100).toISOString() } });
+  }
+  let pages = 0;
+  hubspot.beforeSearchPage = () => {
+    if (++pages === 3) throw new Error('HubSpot 502');
+  };
+  await assert.rejects(worker.scheduled({ scheduledTime: now() }, env), /502/);
+  assert.ok(sent.length >= 300, `queued ${sent.length} before the failure`);
+});
+
+test('/sync?wait=true syncs a few deals, queues the rest, and queues retries', async () => {
+  const { worker, env, sent, hubspot } = setup({ env: { SYNC_API_KEY: 'k' } });
+  for (const id of ['1', '2', '3', '4']) hubspot.deals.set(id, { id, properties: { seats: '1' } });
+  hubspot.failUpdateDeal = (id) => {
+    if (id === '2') throw Object.assign(new Error('503'), { status: 503 });
+  };
+  const res = await worker.fetch(
+    new Request('https://w.example.com/sync?wait=true', { method: 'POST', body: '{"dealIds":["1","2","3","4"]}', headers: { authorization: 'Bearer k' } }),
+    env,
+  );
+  const body = await res.json();
+  assert.deepEqual(body.results.map((r) => [r.dealId, r.outcome, Boolean(r.retryQueued)]), [['1', 'synced', false], ['2', 'error', true], ['3', 'synced', false]]);
+  assert.equal(body.queued, 1);
+  assert.deepEqual(sent.map((m) => [m.body.dealId, m.delaySeconds]), [['2', 60], ['4', 0]]);
 });
 
 test('queue messages are retried when a sync fails for a reason that may pass', async () => {

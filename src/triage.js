@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { evaluateCalculators } from './calculators.js';
 import { ExpressionError, normalizeValues, truthy } from './expression.js';
 import { DEAL, STATUS } from './properties.js';
+import { calculatorIdOf } from './reconcile.js';
 
 export const REVIEW_HINT = 'Review them, then create the quote.';
 const MAX_MESSAGE_LENGTH = 2000;
@@ -24,6 +25,8 @@ export const MESSAGES = {
   syncWhenError: (message) => `Line items were not changed: settings.syncWhen: ${message}`,
   alreadyMatch: `Line items already match the calculator. ${REVIEW_HINT}`,
   noCalculator: 'No calculator applies to this deal, so it has no calculator line items.',
+  orphansLeft: (count) =>
+    `No calculator in the current config applies to this deal. ${count} line item${count === 1 ? '' : 's'} from calculators no longer in the config ${count === 1 ? 'was' : 'were'} left as ${count === 1 ? 'it is' : 'they are'}.`,
   quote:
     'The calculator output changed, but this deal already has a quote, so its line items were left as they are. ' +
     'Update them by hand, or delete the quote and then tick and untick "Calculator line items: freeze" to re-sync.',
@@ -34,7 +37,9 @@ export const MESSAGES = {
 // The deal stores one short hash per calculator line it last applied:
 //   "v2;licences:seats=1a2b3c4d5e6f;licences:support=..."
 // A line is only re-applied when its own hash changes, so the team's edits
-// to other lines survive, including lines from other calculators.
+// to other lines survive, including lines from other calculators. Entries
+// starting with "!" are markers, not lines (e.g. "!quote=<hash>": the
+// output that was held back because the deal has a quote).
 
 const FINGERPRINT_VERSION = 'v2';
 
@@ -44,35 +49,58 @@ export function lineFingerprints(lines) {
   for (const line of lines) {
     const product = line.product.sku !== undefined ? `sku:${line.product.sku}` : `id:${line.product.id}`;
     const canonical = JSON.stringify([product, line.quantity, line.price, line.name, line.description]);
-    map.set(line.key, createHash('sha256').update(canonical).digest('hex').slice(0, 12));
+    map.set(line.key, hash(canonical));
   }
   return map;
 }
 
-export function formatFingerprint(map) {
+export function formatFingerprint(map, markers = {}) {
   const entries = [...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return [FINGERPRINT_VERSION, ...entries.map(([key, hash]) => `${key}=${hash}`)].join(';');
+  const marks = Object.entries(markers).filter(([, value]) => value).map(([name, value]) => `!${name}=${value}`);
+  return [FINGERPRINT_VERSION, ...entries.map(([key, value]) => `${key}=${value}`), ...marks].join(';');
 }
 
-/** Parse a stored fingerprint; null when blank or in an older format. */
+/** Parse a stored fingerprint's line entries; null when blank or in an older format. */
 export function parseFingerprint(text) {
-  if (typeof text !== 'string' || !text.startsWith(FINGERPRINT_VERSION)) return null;
-  const [version, ...entries] = text.split(';');
-  if (version !== FINGERPRINT_VERSION) return null;
-  const map = new Map();
-  for (const entry of entries) {
-    const at = entry.lastIndexOf('=');
-    if (at > 0) map.set(entry.slice(0, at), entry.slice(at + 1));
-  }
-  return map;
+  const entries = splitFingerprint(text);
+  if (!entries) return null;
+  return new Map(entries.filter(([key]) => !key.startsWith('!')));
+}
+
+/** A marker from a stored fingerprint, e.g. fingerprintMarker(text, 'quote'). */
+export function fingerprintMarker(text, name) {
+  return splitFingerprint(text)?.find(([key]) => key === `!${name}`)?.[1] ?? null;
+}
+
+/** A short hash identifying a whole set of line fingerprints. */
+export function digestOf(map) {
+  return hash(formatFingerprint(map));
+}
+
+/** Only the entries for calculators in the config. */
+export function knownEntries(map, calculatorIds) {
+  return new Map([...map].filter(([key]) => calculatorIds.has(calculatorIdOf(key))));
 }
 
 /** Keys whose hash differs between two fingerprint maps (including added/removed). */
 export function changedKeys(stored, current) {
   const keys = new Set();
-  for (const [key, hash] of current) if (stored.get(key) !== hash) keys.add(key);
+  for (const [key, value] of current) if (stored.get(key) !== value) keys.add(key);
   for (const key of stored.keys()) if (!current.has(key)) keys.add(key);
   return keys;
+}
+
+function splitFingerprint(text) {
+  if (typeof text !== 'string' || !text.startsWith(FINGERPRINT_VERSION)) return null;
+  const [version, ...entries] = text.split(';');
+  if (version !== FINGERPRINT_VERSION) return null;
+  return entries
+    .map((entry) => [entry.slice(0, entry.lastIndexOf('=')), entry.slice(entry.lastIndexOf('=') + 1)])
+    .filter(([key]) => key);
+}
+
+function hash(text) {
+  return createHash('sha256').update(text).digest('hex').slice(0, 12);
 }
 
 // --- Triage --------------------------------------------------------------------
@@ -81,7 +109,7 @@ export function changedKeys(stored, current) {
  * What a sync of this deal would do, judged from its properties alone.
  *
  * action "skip" means a sync would change nothing and write nothing:
- *   reason "syncWhen" | "noop" | "frozen" | "errors" | "unchanged"
+ *   reason "syncWhen" | "syncWhenError" | "noop" | "frozen" | "errors" | "unchanged" | "quote"
  * action "sync" means a sync is needed (or needs the API to decide).
  */
 export function triage(config, properties) {
@@ -120,11 +148,17 @@ export function triage(config, properties) {
   }
 
   const fingerprints = lineFingerprints(evaluation.lines);
-  const stored = parseFingerprint(properties[DEAL.fingerprint]);
+  const storedAll = parseFingerprint(properties[DEAL.fingerprint]);
+  // Entries for calculators no longer in the config are kept but ignored.
+  const stored = storedAll && knownEntries(storedAll, new Set(config.calculators.map((calc) => calc.id)));
   if (stored && sameMap(stored, fingerprints) && status === STATUS.synced) {
-    return skip('unchanged', { evaluation, fingerprints, stored });
+    return skip('unchanged', { evaluation, fingerprints, stored, storedAll });
   }
-  return sync('changed', { evaluation, fingerprints, stored });
+  // Held back because of a quote, and the output hasn't changed since.
+  if (status === STATUS.skipped && sameText(message, MESSAGES.quote) && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
+    return skip('quote', { evaluation, fingerprints, stored, storedAll });
+  }
+  return sync('changed', { evaluation, fingerprints, stored, storedAll });
 }
 
 export function sameMap(a, b) {

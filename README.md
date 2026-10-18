@@ -65,9 +65,9 @@ items on later syncs.
 | Line items added by hand (no calculator key) | **Never touched** |
 | Discounts, tax or other fields the team edits | **Never touched**: only quantity, position and (if configured) price, name and description are managed |
 | Line items from a calculator whose file was removed from the config | **Never touched** (`npm run plan` lists them) |
-| Deal has a quote | Nothing changed; status says why (configurable) |
+| Deal has a quote | Nothing changed; status says why (configurable). Not re-checked until the calculator output changes again |
 | "Calculator line items: freeze" ticked | Nothing changed; unticking re-syncs |
-| A calculator input is blank or invalid, or a SKU isn't in the product library | Nothing changed; status "Needs attention" says which property or SKU; re-checked every 15 minutes |
+| A calculator input is blank or invalid, or a SKU isn't in the product library | Nothing changed; status "Needs attention" says which property or SKU; re-checked every 15 minutes. Once fixed, only lines whose values changed are re-applied |
 | No calculator applies and the service has never touched the deal | Nothing written |
 
 ### How duplicates are prevented
@@ -210,20 +210,30 @@ repository in the Cloudflare dashboard (Workers & Pages → the worker → Setti
 Logs: `npx wrangler tail`, or the worker's Logs tab in the Cloudflare dashboard. Look for
 `deal sync` and `deal poll` entries.
 
-**Free plan or Paid ($5/month)?** At a minute-by-minute check, the service uses about 1,440 cron
-runs a day, plus about three Queue operations for each deal it syncs. That's well inside the free
-plan's 100,000 requests and 10,000 queue operations a day, for up to roughly 3,000 deal syncs a
-day. On the free plan each run gets 10 ms of CPU time and 50 outbound requests; one deal sync uses
-about 5–15. The Paid plan removes those ceilings, and is the safer choice for busy accounts.
+**Free plan or Paid ($5/month)?** Start on the free plan; move to Paid if the logs show runs
+being cut short.
+- **Requests and queue:** a minute-by-minute check is about 1,440 cron runs a day, plus about
+  three Queue operations for each deal synced. That's inside the free plan's 100,000 requests and
+  10,000 queue operations a day for up to roughly 3,000 deal syncs a day. A bulk change to many
+  deals can queue some deals more than once while the queue catches up, so it uses more.
+- **Per run:** the free plan gives each run 10 ms of CPU time and 50 outbound requests. One deal
+  sync uses about 5–15 requests, and an ordinary check is a single search. The catch-up checks
+  every 30 minutes look back an hour, which in a busy account can be several hundred deals and
+  may go over 10 ms.
+- **Cut-short runs lose nothing:** deals are queued as each search page is processed, and
+  anything missed is picked up by the next catch-up.
+- **Paid** removes these ceilings, and is the safer choice for busy accounts.
 
-Optional Worker settings (`vars` in `wrangler.jsonc`, or the dashboard):
+Optional Worker settings (`vars` in `wrangler.jsonc`, or the dashboard; `keep_vars` means
+deploys keep what you set there):
 
 | Variable | Default | |
 | --- | --- | --- |
 | `HUBSPOT_API_VERSION` | `2026-09` | HubSpot API version; `legacy` uses the old numbered APIs |
 | `SYNC_POLL_WINDOW_MINUTES` | 5 | How far back each check looks. Keep it at least twice the cron interval, plus 2 |
-| `SYNC_CATCH_UP_MINUTES` | 65 | Once an hour, look back this far, to catch anything missed |
+| `SYNC_CATCH_UP_MINUTES` | 65 | Every 30 minutes, look back this far, to catch anything missed |
 | `SYNC_ERROR_RECHECK_MINUTES` | 15 | How often deals showing "Needs attention" are re-checked |
+| `SYNC_MAX_PAGES_PER_RUN` | 10 | Search pages (200 deals each) per check; more are picked up by later checks |
 | `SYNC_DEBOUNCE_SECONDS` | 5 | Wait this long after a change before syncing |
 | `HUBSPOT_PORTAL_ID` | none | Ignore webhooks from other HubSpot accounts |
 
@@ -305,7 +315,7 @@ One calculator per file in `config/calculators/`:
 | Setting | Default | |
 | --- | --- | --- |
 | `skipWhenQuoteExists` | `true` | Leave a deal's line items alone once it has a quote |
-| `setLineOrder` | `true` | Order new and changed lines as in the config (`hs_position_on_quote`) |
+| `setLineOrder` | `true` | Keep calculator lines in config order (`hs_position_on_quote`), applied whenever the deal syncs. Turn off to order lines by hand |
 | `syncWhen` | none | Formula; deals that don't match are ignored entirely, e.g. `"dealstage != \"closedwon\""` |
 
 ### Formulas
@@ -336,15 +346,16 @@ Formulas refer to deal properties by **internal name**.
 | --- | --- |
 | `GET /health` | Liveness check; lists the deployed calculators |
 | `POST /webhooks/hubspot` | HubSpot webhooks (v3 signature required) |
-| `POST /sync` | `{"dealId": "123"}` or `{"dealIds": [...]}` or a workflow webhook payload; `Authorization: Bearer <SYNC_API_KEY>`. `?wait=true` returns the result; `&force=true` re-applies every line |
+| `POST /sync` | `{"dealId": "123"}` or `{"dealIds": [...]}` or a workflow webhook payload; `Authorization: Bearer <SYNC_API_KEY>`. `?wait=true` syncs up to 3 deals and returns the results (more are queued; failures are queued for retry); `&force=true` re-applies every line |
 
 What runs on its own:
 - **Every minute:** deals changed in the last 5 minutes are triaged from the search results
   alone. Only those that need a sync go on the queue, so unchanged deals cost nothing beyond the
   search.
-- **Every hour:** the same check looks back 65 minutes, to catch anything a delayed or failed run
-  missed.
-- **Every 15 minutes:** deals showing *Needs attention* are re-checked.
+- **Every 30 minutes:** the same check looks back 65 minutes, to catch anything a delayed or
+  failed run missed. Every moment is covered by two catch-ups.
+- **Every 15 minutes:** deals showing *Needs attention* are re-checked. Closed deals excluded by
+  `syncWhen`, and inputs that are still wrong, are skipped without being queued.
 - **When a sync fails** for a temporary reason (HubSpot unavailable, rate limited), the queue
   retries it a minute later, up to 5 times.
 
@@ -397,14 +408,17 @@ switches back to the older numbered APIs, which work until September 2027.
   simulated HubSpot, and the Worker has been run in Cloudflare's local runtime (workerd) against a
   mock HubSpot API. The API calls follow HubSpot's `2026-09` documentation. Before going live, run
   `npm run plan` then `npm run sync` on a test deal and check the result in HubSpot.
-- **Line item order:** the service sets `hs_position_on_quote` on new and changed lines. HubSpot
-  documents this property only lightly. If HubSpot rejects it, set `"setLineOrder": false` and
-  reorder on the quote instead.
+- **Line item order:** the service sets `hs_position_on_quote` to keep calculator lines in config
+  order. HubSpot documents this property only lightly. If HubSpot rejects it, set
+  `"setLineOrder": false` and reorder on the quote instead.
+- **Products swapped in the library:** if a SKU is moved to a different product, existing lines
+  keep the old product until their values change. Run `npm run sync -- --all --force` to move them
+  all now. A forced sync re-applies every line, so it also resets hand edits.
 - **Multi-currency:** new line items get the deal's currency (`deal_currency_code`). If you don't
   set prices in the config, check that the product library price is right for that currency.
-- **Bulk updates:** each Cloudflare check covers up to 8,000 changed deals. Beyond that, for
-  example a large import, the hourly catch-up covers more, and
-  `npm run sync -- --all` catches the rest.
+- **Bulk updates:** each Cloudflare check covers up to 2,000 changed deals
+  (`SYNC_MAX_PAGES_PER_RUN`). Beyond that, for example a large import, the catch-ups every 30
+  minutes cover more, and `npm run sync -- --all` catches anything left.
 - If someone deletes a calculator line by hand, it stays deleted until that line's calculated
   values change (or a forced sync).
 

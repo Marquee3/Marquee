@@ -63,7 +63,7 @@ export function calculatorIdOf(key) {
 export function planReconciliation(desired, existing, { calculatorIds = null, scope = null } = {}) {
   const known = (key) => !calculatorIds || calculatorIds.has(calculatorIdOf(key));
   const managed = groupByKey(existing);
-  const plan = { create: [], update: [], archive: [], keep: [], orphans: [] };
+  const plan = { create: [], update: [], reorder: [], archive: [], keep: [], orphans: [] };
 
   for (const [key, items] of managed) {
     if (!known(key)) {
@@ -80,8 +80,17 @@ export function planReconciliation(desired, existing, { calculatorIds = null, sc
     const current = managed.get(line.key)?.[0];
     if (scope && !scope.has(line.key)) {
       // Unchanged since the last sync: keep whatever is on the deal,
-      // including a line the team deliberately deleted.
-      if (current) plan.keep.push({ id: current.id, key: line.key });
+      // including a line the team deliberately deleted. Only its position
+      // follows the config, so lines added or removed around it can't leave
+      // two lines in the same place.
+      if (current) {
+        const position = line.position ?? null;
+        if (position !== null && !sameNumber(current.properties?.hs_position_on_quote ?? null, String(position))) {
+          plan.reorder.push({ id: current.id, key: line.key, properties: { hs_position_on_quote: String(position) } });
+        } else {
+          plan.keep.push({ id: current.id, key: line.key });
+        }
+      }
       continue;
     }
     if (!current) {
@@ -113,7 +122,7 @@ export function planReconciliation(desired, existing, { calculatorIds = null, sc
 }
 
 export function isEmptyPlan(plan) {
-  return plan.create.length === 0 && plan.update.length === 0 && plan.archive.length === 0;
+  return !plan.create.length && !plan.update.length && !plan.archive.length && !(plan.reorder?.length);
 }
 
 /**

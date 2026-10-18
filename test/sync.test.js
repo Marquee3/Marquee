@@ -262,7 +262,9 @@ test('HubSpot failures are reported on the deal', async () => {
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'error');
   assert.equal(deal().calc_line_items_status, 'error');
-  assert.equal(deal().calc_line_items_fingerprint, '');
+  // The lines being created are in an unknown state, so their fingerprints
+  // are dropped (here: all of them, as it was the first sync).
+  assert.equal(deal().calc_line_items_fingerprint, 'v2');
   assert.match(deal().calc_line_items_message, /Run "npm run setup"/);
 });
 
@@ -444,4 +446,142 @@ test('a fingerprint in an older format means every line is re-checked', async ()
   assert.equal(result.outcome, 'unchanged');
   assert.match(deal().calc_line_items_fingerprint, /^v2;/);
   assert.equal(hubspot.dealLineItems('7').length, 3);
+});
+
+// --- Regressions from the second review -------------------------------------------
+
+function editAndDelete(hubspot) {
+  // The team sets seats to 75 by hand and deletes the mounts line.
+  const items = hubspot.dealLineItems('7');
+  items.find((li) => li.properties.calc_line_key === 'licences:seats').properties.quantity = '75';
+  hubspot.lineItems.delete(items.find((li) => li.properties.calc_line_key === 'hardware:mounts').id);
+}
+const seatsQty = (hubspot) => hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'licences:seats')?.properties.quantity;
+const hasMounts = (hubspot) => hubspot.dealLineItems('7').some((li) => li.properties.calc_line_key === 'hardware:mounts');
+
+test('an input error and its fix leave the team\'s edits alone', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  editAndDelete(hubspot);
+  hubspot.deals.get('7').properties.unit_rate = '';
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  hubspot.deals.get('7').properties.unit_rate = '9.5';
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'unchanged');
+  assert.equal(seatsQty(hubspot), '75');
+  assert.equal(hasMounts(hubspot), false);
+});
+
+test('a temporary HubSpot error before anything is written leaves edits alone on retry', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  editAndDelete(hubspot);
+  hubspot.deals.get('7').properties.rooms = '7'; // hardware lines change
+  const realQuotes = hubspot.getAssociatedIds.bind(hubspot);
+  hubspot.getAssociatedIds = async (from, id, to, opts) => {
+    if (to === 'quotes') {
+      const { HubSpotError } = await import('../src/hubspot.js');
+      throw new HubSpotError({ status: 429, method: 'POST', path: 'associations', body: { message: 'rate limited' } });
+    }
+    return realQuotes(from, id, to, opts);
+  };
+  const failed = await sync.syncDeal('7');
+  assert.equal(failed.retry, true);
+  hubspot.getAssociatedIds = realQuotes;
+  await sync.syncDeal('7');
+  assert.equal(seatsQty(hubspot), '75', 'seats output did not change, so the hand edit stands');
+  assert.equal(hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'hardware:units').properties.quantity, '84');
+});
+
+test('a failure part-way through applying re-checks only the lines being changed', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  editAndDelete(hubspot);
+  hubspot.deals.get('7').properties.rooms = '7';
+  const realUpdate = hubspot.updateLineItems.bind(hubspot);
+  hubspot.updateLineItems = async () => {
+    throw new Error('HubSpot POST batch/update failed (502): bad gateway');
+  };
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  hubspot.updateLineItems = realUpdate;
+  await sync.syncDeal('7');
+  assert.equal(seatsQty(hubspot), '75');
+  assert.equal(hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'hardware:units').properties.quantity, '84');
+});
+
+test('removing and restoring a calculator file doesn\'t reset its lines', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  editAndDelete(hubspot);
+  const withoutLicences = structuredClone(CONFIG);
+  withoutLicences.calculators = withoutLicences.calculators.filter((c) => c.id !== 'licences');
+  const removed = new LineItemSync({ hubspot, config: parseConfig(withoutLicences), products: new ProductResolver(hubspot) });
+  hubspot.deals.get('7').properties.rooms = '7';
+  await removed.syncDeal('7');
+  assert.match(hubspot.deals.get('7').properties.calc_line_items_fingerprint, /licences:seats=/, 'kept for the missing calculator');
+
+  const empty = new LineItemSync({ hubspot, config: parseConfig({ calculators: [] }), products: new ProductResolver(hubspot) });
+  hubspot.calls = [];
+  assert.equal((await empty.syncDeal('7')).outcome, 'unchanged', 'nothing it manages has changed');
+  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal']);
+  const forced = await empty.syncDeal('7', { force: true });
+  assert.match(forced.message, /3 line items from calculators no longer in the config were left as they are/);
+
+  const restored = await sync.syncDeal('7');
+  assert.equal(restored.outcome, 'unchanged');
+  assert.equal(seatsQty(hubspot), '75');
+});
+
+test('lines keep the config order when lines are added around them', async () => {
+  const config = structuredClone(CONFIG);
+  config.calculators[0].lineItems[0].includeWhen = 'include_units';
+  const { hubspot, sync } = setup({ include_units: 'false' }, { config });
+  await sync.syncDeal('7');
+  const position = (key) => hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === key).properties.hs_position_on_quote;
+  assert.deepEqual([position('hardware:mounts'), position('licences:seats')], ['0', '1']);
+  hubspot.deals.get('7').properties.include_units = 'true';
+  const result = await sync.syncDeal('7');
+  assert.deepEqual([position('hardware:units'), position('hardware:mounts'), position('licences:seats')], ['0', '1', '2']);
+  assert.match(result.message, /Added 1 and reordered 2 line items/);
+});
+
+test('--force never overrides a freeze', async () => {
+  const { hubspot, sync } = setup({ rooms: '', users: '', calc_line_items_frozen: 'true' });
+  hubspot.addLineItem('7', { calc_line_key: 'hardware:units', hs_product_id: '1', quantity: '3' });
+  const result = await sync.syncDeal('7', { force: true });
+  assert.equal(result.outcome, 'skipped');
+  assert.equal(hubspot.dealLineItems('7').length, 1);
+});
+
+test('a status write that fails again on retry still asks for another retry', async () => {
+  const { hubspot, sync } = setup();
+  hubspot.failUpdateDeal = () => {
+    throw Object.assign(new Error('503'), { status: 503 });
+  };
+  assert.equal((await sync.syncDeal('7')).retry, true);
+  assert.equal((await sync.syncDeal('7')).retry, true, 'lines exist but the deal still has no status');
+  hubspot.failUpdateDeal = null;
+  assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
+  assert.equal(hubspot.deals.get('7').properties.calc_line_items_status, 'synced');
+});
+
+test('a deal held back by a quote is not re-checked until its output changes', async () => {
+  const { hubspot, sync } = setup();
+  const { triage } = await import('../src/triage.js');
+  const config = parseConfig(CONFIG);
+  await sync.syncDeal('7');
+  hubspot.quotes.set('7', ['555']);
+  hubspot.deals.get('7').properties.users = '120';
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.equal(triage(config, hubspot.deals.get('7').properties).action, 'skip', 'poller skips it now');
+  hubspot.deals.get('7').properties.users = '130';
+  assert.equal(triage(config, hubspot.deals.get('7').properties).action, 'sync', 'output changed again');
+
+  // Quote deleted, then freeze ticked and unticked: the held-back change is applied.
+  hubspot.quotes.delete('7');
+  hubspot.deals.get('7').properties.calc_line_items_frozen = 'true';
+  await sync.syncDeal('7');
+  hubspot.deals.get('7').properties.calc_line_items_frozen = 'false';
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(seatsQty(hubspot), '130');
 });

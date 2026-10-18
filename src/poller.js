@@ -126,6 +126,7 @@ export class DealPoller {
     if (this.#sweeps % this.#errorRecheckEvery === 0) {
       await findErrorDeals({
         hubspot: this.#hubspot,
+        config: this.#config,
         onDeal: (id) => {
           errorsRequeued++;
           this.#queue.enqueue(id);

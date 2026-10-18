@@ -24,17 +24,20 @@ const DEFAULTS = {
   // gap between runs plus HubSpot's search index lag; deals already synced
   // are skipped without further API calls.
   windowMinutes: 5,
-  // Once an hour, look back further, to catch anything missed while cron
-  // runs were delayed or failing.
+  // Every 30 minutes, look back further, to catch anything missed while
+  // cron runs were delayed or failing. 65 minutes means every moment is
+  // covered by two catch-ups, so one failed catch-up leaves no gap.
   catchUpMinutes: 65,
+  catchUpEveryMinutes: 30,
   errorRecheckMinutes: 15,
   debounceSeconds: 5,
   retryDelaySeconds: 60,
+  // Search pages per cron run (200 deals each). Deals are queued page by
+  // page, so a run cut short still keeps what it found.
+  maxPagesPerRun: 10,
 };
-// Search pages per cron run (200 deals each); keeps each run well inside
-// the Workers free plan's 50 outbound requests per invocation.
-const MAX_PAGES = 40;
 const QUEUE_BATCH = 100;
+const WAIT_LIMIT = 3;
 
 export function createWorker(rawConfig, { createClient = (env) => defaultClient(env) } = {}) {
   const config = parseConfig(rawConfig);
@@ -54,6 +57,7 @@ export function createWorker(rawConfig, { createClient = (env) => defaultClient(
     catchUpMinutes: positive(env.SYNC_CATCH_UP_MINUTES, DEFAULTS.catchUpMinutes),
     errorRecheckMinutes: positive(env.SYNC_ERROR_RECHECK_MINUTES, DEFAULTS.errorRecheckMinutes),
     debounceSeconds: positive(env.SYNC_DEBOUNCE_SECONDS, DEFAULTS.debounceSeconds, { allowZero: true }),
+    maxPagesPerRun: positive(env.SYNC_MAX_PAGES_PER_RUN, DEFAULTS.maxPagesPerRun),
   });
 
   async function enqueue(env, dealIds, { delaySeconds = 0, force = false } = {}) {
@@ -108,13 +112,18 @@ export function createWorker(rawConfig, { createClient = (env) => defaultClient(
           if (!dealIds.length) return json(400, { error: 'send {"dealId": "..."} or a HubSpot workflow webhook payload' });
           const force = url.searchParams.get('force') === 'true';
           if (url.searchParams.get('wait') === 'true') {
+            // A few deals at most: each sync makes several HubSpot calls, and a
+            // request has a limited number of outbound calls.
             const { sync } = appFor(env);
             const results = [];
-            for (const id of dealIds.slice(0, 5)) {
-              const { dealId, outcome, message } = await sync.syncDeal(id, { force });
-              results.push({ dealId, outcome, message });
+            for (const id of dealIds.slice(0, WAIT_LIMIT)) {
+              const { dealId, outcome, message, retry } = await sync.syncDeal(id, { force });
+              if (retry) await enqueue(env, [dealId], { delaySeconds: DEFAULTS.retryDelaySeconds, force });
+              results.push({ dealId, outcome, message, ...(retry ? { retryQueued: true } : {}) });
             }
-            return json(200, { results, ...(dealIds.length > 5 ? { note: 'only the first 5 deals are synced with wait=true' } : {}) });
+            const rest = dealIds.slice(WAIT_LIMIT);
+            if (rest.length) await enqueue(env, rest, { force });
+            return json(200, { results, ...(rest.length ? { queued: rest.length } : {}) });
           }
           return json(202, { queued: await enqueue(env, dealIds, { force }) });
         }
@@ -130,28 +139,47 @@ export function createWorker(rawConfig, { createClient = (env) => defaultClient(
       const now = controller.scheduledTime ?? Date.now();
       const s = settings(env);
       const minute = Math.floor(now / 60_000);
-      const lookback = minute % 60 === 0 ? s.catchUpMinutes : s.windowMinutes;
+      const catchUp = minute % DEFAULTS.catchUpEveryMinutes === 0;
+      const lookback = catchUp ? s.catchUpMinutes : s.windowMinutes;
       const { hubspot } = appFor(env);
-      const dealIds = [];
 
-      const result = await findChangedDeals({
-        hubspot,
-        config,
-        sinceMs: now - lookback * 60_000,
-        maxPages: MAX_PAGES,
-        quietMs: s.debounceSeconds * 1000,
-        now,
-        onDeal: (id) => dealIds.push(id),
-      });
-      if (result.capped) logger.warn('more changed deals than one cron run covers; the hourly catch-up continues', { scanned: result.scanned });
+      // Queue deals as they're found, so a run that's cut short (CPU limit,
+      // a HubSpot error on a later page) keeps what it already found.
+      let pending = [];
+      let queued = 0;
+      const flush = async () => {
+        if (!pending.length) return;
+        const batch = pending;
+        pending = [];
+        queued += await enqueue(env, batch);
+      };
+      const found = async (id) => {
+        pending.push(id);
+        if (pending.length >= QUEUE_BATCH) await flush();
+      };
 
-      let errorsRequeued = 0;
-      if (minute % s.errorRecheckMinutes === 0) {
-        await findErrorDeals({ hubspot, onDeal: (id) => { errorsRequeued++; dealIds.push(id); } });
+      let scanned = 0;
+      try {
+        const result = await findChangedDeals({
+          hubspot,
+          config,
+          sinceMs: now - lookback * 60_000,
+          maxPages: s.maxPagesPerRun,
+          quietMs: s.debounceSeconds * 1000,
+          now,
+          onDeal: found,
+        });
+        scanned = result.scanned;
+        if (result.capped) logger.warn('more changed deals than one cron run covers; later runs and catch-ups continue', { scanned });
+
+        // On its own minutes, not with a catch-up, to keep each run small.
+        if (minute % s.errorRecheckMinutes === s.errorRecheckMinutes - 1) {
+          await findErrorDeals({ hubspot, config, onDeal: found });
+        }
+      } finally {
+        await flush();
       }
-
-      const queued = await enqueue(env, dealIds);
-      if (queued) logger.info('deal poll', { scanned: result.scanned, queued, errorsRequeued: errorsRequeued || undefined, lookbackMinutes: lookback });
+      if (queued) logger.info('deal poll', { scanned, queued, lookbackMinutes: lookback });
     },
 
     async queue(batch, env) {

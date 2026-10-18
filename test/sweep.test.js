@@ -44,9 +44,35 @@ test('backfill skips deals whose lines already match', async () => {
   assert.deepEqual(found, ['1', '3']);
 });
 
-test('error re-check finds deals needing attention', async () => {
-  const hubspot = hubspotWith(5, (i) => ({ calc_line_items_status: i % 2 ? 'error' : 'synced' }));
+test('error re-check finds deals needing attention, except ones triage rules out', async () => {
+  const config = parseConfig({
+    settings: { syncWhen: 'dealstage != "closedlost"' },
+    calculators: [{ id: 'c', appliesWhen: 'seats > 0', lineItems: [{ key: 'x', product: { sku: 'S' }, quantity: 'seats', unitPrice: 'rate' }] }],
+  });
+  const { MESSAGES } = await import('../src/triage.js');
+  const hubspot = hubspotWith(5, (i) => ({ calc_line_items_status: i % 2 ? 'error' : 'synced', seats: '2', rate: '1' }));
+  // Closed lost: excluded by syncWhen, so re-checking it would never change anything.
+  Object.assign(hubspot.deals.get('3').properties, { dealstage: 'closedlost' });
+  // Already shows the same input error.
+  Object.assign(hubspot.deals.get('5').properties, {
+    rate: '',
+    calc_line_items_message: MESSAGES.inputErrors(['c › x: unitPrice: deal property "rate" is empty']),
+  });
   const found = [];
-  await findErrorDeals({ hubspot, onDeal: (id) => found.push(id) });
-  assert.deepEqual(found, ['1', '3', '5']);
+  await findErrorDeals({ hubspot, config, onDeal: (id) => found.push(id) });
+  assert.deepEqual(found, ['1']);
+});
+
+test('backfill with skipTriage passes every deal on (for --force)', async () => {
+  const hubspot = hubspotWith(3, () => ({ p1: '2' }));
+  const { lineFingerprints, formatFingerprint } = await import('../src/triage.js');
+  const { evaluateCalculators } = await import('../src/calculators.js');
+  const applied = formatFingerprint(lineFingerprints(evaluateCalculators(CONFIG, { p1: '2' }).lines));
+  for (const id of ['1', '2', '3']) Object.assign(hubspot.deals.get(id).properties, { calc_line_items_status: 'synced', calc_line_items_fingerprint: applied });
+  const normal = [];
+  await findDealsWithInputs({ hubspot, config: CONFIG, inputProperties: ['p1'], onDeal: (id) => normal.push(id) });
+  const forced = [];
+  await findDealsWithInputs({ hubspot, config: CONFIG, inputProperties: ['p1'], skipTriage: true, onDeal: (id) => forced.push(id) });
+  assert.deepEqual(normal, []);
+  assert.deepEqual(forced, ['1', '2', '3']);
 });

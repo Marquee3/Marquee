@@ -312,6 +312,8 @@ async function backfill({ calculatorId, all, force, dryRun }) {
     config,
     inputProperties,
     includeSynced: Boolean(all),
+    // --force means "re-apply even if unchanged", so don't filter those out.
+    skipTriage: Boolean(force),
     onDeal: async (dealId) => {
       const result = await engine.syncDeal(dealId, { force, dryRun });
       counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;

@@ -29,6 +29,8 @@
   "vars": {
     "HUBSPOT_API_VERSION": "2026-09"
   },
+  // Keep settings added in the Cloudflare dashboard when deploying.
+  "keep_vars": true,
 
   "observability": { "enabled": true }
 }

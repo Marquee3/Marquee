@@ -78,31 +78,42 @@ export async function findChangedDeals({ hubspot, config, sinceMs, maxPages = 50
 }
 
 /**
- * Deals whose last sync ended in "Needs attention". These are retried
- * periodically, because the fix is often outside the deal (a product added
- * to the library, a calculator file corrected), which doesn't change the
- * deal and so doesn't bring it back into the modified-since window.
+ * Deals whose last sync ended in "Needs attention", re-checked periodically
+ * because the fix is often outside the deal (a product added to the
+ * library, a calculator file corrected), which doesn't change the deal and
+ * so doesn't bring it back into the modified-since window. Deals that
+ * triage can rule out (closed deals excluded by syncWhen, or an input error
+ * the deal already shows) are skipped, so they aren't re-queued forever.
  */
-export async function findErrorDeals({ hubspot, maxPages = 10, onDeal }) {
-  return searchByObjectId({
+export async function findErrorDeals({ hubspot, config, maxPages = 10, onDeal }) {
+  let found = 0;
+  const result = await searchByObjectId({
     hubspot,
     groups: [[{ propertyName: DEAL.status, operator: 'EQ', value: STATUS.error }]],
-    properties: [DEAL.status],
+    properties: triageProperties(config),
     maxPages,
-    onDeal: (deal) => onDeal(String(deal.id)),
+    onDeal: async (deal) => {
+      if (triage(config, deal.properties ?? {}).action === 'skip') return;
+      found++;
+      await onDeal(String(deal.id));
+    },
   });
+  return { found, capped: result.capped };
 }
 
 /**
  * Deals that have any of `inputProperties` filled in, or that the app has
  * synced before, for backfilling after a calculator is added or changed.
+ * With skipTriage (for --force), every deal found is passed on, including
+ * those whose lines already match.
  */
-export async function findDealsWithInputs({ hubspot, config, inputProperties, includeSynced = false, maxPages = Infinity, onDeal }) {
+export async function findDealsWithInputs({ hubspot, config, inputProperties, includeSynced = false, skipTriage = false, maxPages = Infinity, onDeal }) {
   const groups = inputProperties.map((name) => [{ propertyName: name, operator: 'HAS_PROPERTY' }]);
   if (includeSynced) groups.push([{ propertyName: DEAL.status, operator: 'HAS_PROPERTY' }]);
   const properties = triageProperties(config);
   let scanned = 0;
   let found = 0;
+  const seen = new Set();
   // HubSpot allows 5 filter groups (ORed) per search, so search in batches.
   for (let i = 0; i < groups.length; i += 5) {
     const result = await searchByObjectId({
@@ -111,8 +122,11 @@ export async function findDealsWithInputs({ hubspot, config, inputProperties, in
       properties,
       maxPages,
       onDeal: async (deal) => {
+        // A deal matching several batches is handled once.
+        if (seen.has(String(deal.id))) return;
+        seen.add(String(deal.id));
         scanned++;
-        if (triage(config, deal.properties ?? {}).action === 'skip') return;
+        if (!skipTriage && triage(config, deal.properties ?? {}).action === 'skip') return;
         found++;
         await onDeal(String(deal.id));
       },
