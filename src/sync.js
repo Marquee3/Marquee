@@ -73,14 +73,20 @@ export class LineItemSync {
       return result('skipped', 'Deal does not match settings.syncWhen.');
     }
 
+    // 1. Work out the line items the deal should have.
+    const evaluation = evaluateCalculators(this.config, properties);
+    if (!evaluation.lines.length && !evaluation.errors.length && !properties[DEAL.fingerprint] && !properties[DEAL.status]) {
+      // No calculator applies and the app has never touched this deal (it
+      // always leaves a status), so there can't be any of its lines to remove.
+      return result('noop', 'No calculator applies to this deal.', { desired: [] });
+    }
+
     if (truthy(values[DEAL.frozen])) {
       const message = 'Line items are frozen on this deal, so they were not updated. Untick "Calculator line items: freeze" to re-sync them.';
       await this.#writeStatus(deal, { status: STATUS.skipped, message }, dryRun);
       return result('skipped', message);
     }
 
-    // 1. Work out the line items the deal should have.
-    const evaluation = evaluateCalculators(this.config, properties);
     const skus = evaluation.lines.filter((line) => line.product.sku).map((line) => line.product.sku);
     const { products, errors: productErrors } = skus.length
       ? await this.products.resolve(skus)
@@ -114,10 +120,6 @@ export class LineItemSync {
     const plan = planReconciliation(desired, existing);
 
     if (isEmptyPlan(plan)) {
-      if (!desired.length && !properties[DEAL.fingerprint] && !properties[DEAL.status]) {
-        // A deal the app has never touched and no calculator applies to.
-        return result('noop', 'No calculator applies to this deal.', { desired, plan });
-      }
       const message = desired.length
         ? `Line items already match the calculator. ${REVIEW_HINT}`
         : 'No calculator applies to this deal, so it has no calculator line items.';
@@ -169,14 +171,24 @@ export class LineItemSync {
 
   async #writeStatus(deal, { status, message, fingerprint }, dryRun) {
     if (dryRun) return;
+    // An error clears the fingerprint so the next trigger retries in full.
+    if (status === STATUS.error) fingerprint = '';
+    const text = truncate(message);
+
+    // Skip the write when the deal already says this. Every write changes
+    // the deal's last-modified time, which would make the poller pick the
+    // deal up again and again.
+    const current = deal.properties ?? {};
+    const sameStatus = current[DEAL.status] === status && sameText(current[DEAL.message], text);
+    const sameFingerprint = fingerprint === undefined || (current[DEAL.fingerprint] ?? '') === fingerprint;
+    if (sameStatus && sameFingerprint) return;
+
     const properties = {
       [DEAL.status]: status,
-      [DEAL.message]: truncate(message),
+      [DEAL.message]: text,
       [DEAL.syncedAt]: this.now().toISOString(),
     };
     if (fingerprint !== undefined) properties[DEAL.fingerprint] = fingerprint;
-    // An error clears the fingerprint so the next trigger retries in full.
-    if (status === STATUS.error) properties[DEAL.fingerprint] = '';
     try {
       await this.hubspot.updateDeal(deal.id, properties);
     } catch (err) {
@@ -237,6 +249,12 @@ function describeError(err) {
     return `${message} (have the app's custom properties been created? Run "npm run setup".)`;
   }
   return message;
+}
+
+// HubSpot may normalise whitespace in stored text, so compare loosely.
+function sameText(a, b) {
+  const normalize = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+  return normalize(a) === normalize(b);
 }
 
 function truncate(text) {

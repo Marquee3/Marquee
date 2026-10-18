@@ -2,6 +2,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { logger } from './logger.js';
+import { DealPoller } from './poller.js';
 import { DealSyncQueue } from './queue.js';
 import { createApp, loadEnv, readServerSettings } from './runtime.js';
 import { dealIdsFromEvents, verifySignatureV3 } from './webhooks.js';
@@ -137,25 +138,42 @@ function send(res, status, body) {
 
 async function main() {
   loadEnv();
-  const { sync, config } = await createApp();
+  const { sync, config, hubspot } = await createApp();
   const settings = readServerSettings();
   const queue = new DealSyncQueue((dealId, options) => sync.syncDeal(dealId, options), {
     debounceMs: settings.debounceMs,
     concurrency: settings.concurrency,
     logger,
   });
+  const poller =
+    settings.pollSeconds > 0
+      ? new DealPoller({
+          hubspot,
+          queue,
+          config,
+          intervalMs: settings.pollSeconds * 1000,
+          lookbackMs: settings.pollLookbackMinutes * 60_000,
+          logger,
+        })
+      : null;
   const server = createServer({ queue, logger, ...settings });
   server.listen(settings.port, () => {
     logger.info('listening', {
       port: settings.port,
       calculators: config.calculators.map((c) => c.id),
+      pollSeconds: poller ? settings.pollSeconds : 'off',
       signedWebhooks: Boolean(settings.clientSecret),
       syncEndpoint: Boolean(settings.syncApiKey),
     });
+    if (!config.calculators.length) {
+      logger.warn('no calculators configured yet; add a file to config/calculators/ (npm run new-calculator)');
+    }
+    poller?.start();
   });
 
   const shutdown = () => {
     logger.info('shutting down; finishing queued syncs');
+    poller?.stop();
     server.close();
     queue.flush().finally(() => process.exit(0));
   };

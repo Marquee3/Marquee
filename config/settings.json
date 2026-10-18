@@ -1,0 +1,5 @@
+{
+  "$comment": "Settings that apply to every calculator. See README > Settings.",
+  "skipWhenQuoteExists": true,
+  "setLineOrder": true
+}

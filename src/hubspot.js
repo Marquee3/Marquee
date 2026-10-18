@@ -105,6 +105,20 @@ export class HubSpotClient {
     return this.request('PATCH', `/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, { body: { properties } });
   }
 
+  /** One page of deals modified at or after `sinceMs`, oldest first. */
+  async searchDealsModifiedSince(sinceMs, properties, { after, limit = 200 } = {}) {
+    const response = await this.request('POST', '/crm/v3/objects/deals/search', {
+      body: {
+        filterGroups: [{ filters: [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: String(sinceMs) }] }],
+        sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
+        properties,
+        limit,
+        after,
+      },
+    });
+    return { results: response?.results ?? [], after: response?.paging?.next?.after };
+  }
+
   /** IDs of records of `toType` associated with a record, e.g. a deal's line items. */
   async getAssociatedIds(fromType, fromId, toType, { max = Infinity } = {}) {
     const ids = new Set();

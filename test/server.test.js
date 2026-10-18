@@ -33,8 +33,8 @@ test('queues deals from a signed webhook', async () => {
   const publicUrl = 'https://line-items.example.com';
   await withServer({ clientSecret: 's3cret', publicUrl }, async ({ base, enqueued }) => {
     const body = JSON.stringify([
-      { subscriptionType: 'deal.propertyChange', objectId: 42, propertyName: 'guest_count' },
-      { subscriptionType: 'deal.propertyChange', objectId: 42, propertyName: 'marquee_width_m' },
+      { subscriptionType: 'deal.propertyChange', objectId: 42, propertyName: 'licence_seats' },
+      { subscriptionType: 'deal.propertyChange', objectId: 42, propertyName: 'services_days' },
     ]);
     const res = await fetch(`${base}/webhooks/hubspot`, {
       method: 'POST',

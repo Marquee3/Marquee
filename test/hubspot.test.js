@@ -80,3 +80,17 @@ test('archive returns nothing (204)', async () => {
   await clientWith(fetch).archiveLineItems(['1', '2']);
   assert.deepEqual(requests[0].body, { inputs: [{ id: '1' }, { id: '2' }] });
 });
+
+test('searches deals modified since a time, oldest first', async () => {
+  const { fetch, requests } = fakeFetch(() => ({ body: { results: [{ id: '1' }], paging: { next: { after: '200' } } } }));
+  const page = await clientWith(fetch).searchDealsModifiedSince(1760000000000, ['seats'], { after: '0', limit: 200 });
+  assert.deepEqual(page, { results: [{ id: '1' }], after: '200' });
+  assert.equal(requests[0].url.pathname, '/crm/v3/objects/deals/search');
+  assert.deepEqual(requests[0].body, {
+    filterGroups: [{ filters: [{ propertyName: 'hs_lastmodifieddate', operator: 'GTE', value: '1760000000000' }] }],
+    sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
+    properties: ['seats'],
+    limit: 200,
+    after: '0',
+  });
+});

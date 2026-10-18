@@ -51,8 +51,8 @@ test('rejects bad, missing and stale signatures', () => {
 
 test('extracts deal IDs from classic and generic subscription events', () => {
   const ids = dealIdsFromEvents([
-    { subscriptionType: 'deal.propertyChange', objectId: 11, propertyName: 'guest_count', portalId: 5 },
-    { subscriptionType: 'deal.propertyChange', objectId: 11, propertyName: 'marquee_width_m', portalId: 5 },
+    { subscriptionType: 'deal.propertyChange', objectId: 11, propertyName: 'licence_seats', portalId: 5 },
+    { subscriptionType: 'deal.propertyChange', objectId: 11, propertyName: 'services_days', portalId: 5 },
     { subscriptionType: 'object.propertyChange', objectTypeId: '0-3', objectId: 12, portalId: 5 },
     { subscriptionType: 'object.propertyChange', objectTypeId: '0-1', objectId: 13, portalId: 5 },
     { subscriptionType: 'deal.deletion', objectId: 14, portalId: 5 },

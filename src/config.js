@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { compile, compileTemplate, ExpressionError } from './expression.js';
 
 export class ConfigError extends Error {
@@ -9,28 +10,78 @@ export class ConfigError extends Error {
   }
 }
 
-const ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/i;
+export const ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/i;
 
 const TOP_LEVEL_FIELDS = ['settings', 'calculators'];
 const SETTINGS_FIELDS = ['skipWhenQuoteExists', 'setLineOrder', 'syncWhen'];
 const CALCULATOR_FIELDS = ['id', 'name', 'appliesWhen', 'lineItems', 'notes'];
 const LINE_FIELDS = ['key', 'product', 'quantity', 'unitPrice', 'totalPrice', 'includeWhen', 'name', 'description', 'notes'];
 
-export async function loadConfig(path) {
+/**
+ * Load config from a directory:
+ *
+ *   <dir>/settings.json            optional, settings for all calculators
+ *   <dir>/calculators/<any>.json   one calculator per file
+ *
+ * Adding a calculator means adding a file; nothing else needs editing.
+ * Files are read in name order, which is also the order their line items
+ * appear on the deal.
+ */
+export async function loadConfig(dir) {
+  const problems = [];
+  const settings = await readJson(join(dir, 'settings.json'), 'settings.json', problems, { optional: true });
+
+  let files = [];
+  try {
+    files = (await readdir(join(dir, 'calculators'), { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !entry.name.startsWith('.'))
+      .map((entry) => entry.name)
+      .sort();
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+
+  const calculators = [];
+  for (const file of files) {
+    const label = `calculators/${file}`;
+    const raw = await readJson(join(dir, 'calculators', file), label, problems);
+    if (raw === undefined) continue;
+    if (!isObject(raw)) problems.push(`${label}: expected a JSON object describing one calculator`);
+    else calculators.push({ ...raw, $file: label });
+  }
+
+  // Validate the files that did parse too, so every problem shows at once.
+  try {
+    const config = parseConfig({ ...(settings === undefined ? {} : { settings }), calculators });
+    if (problems.length) throw new ConfigError(problems);
+    return config;
+  } catch (err) {
+    if (err instanceof ConfigError && problems.length && err.problems !== problems) {
+      throw new ConfigError([...problems, ...err.problems]);
+    }
+    throw err;
+  }
+}
+
+async function readJson(path, label, problems, { optional = false } = {}) {
   let text;
   try {
     text = await readFile(path, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') throw new ConfigError([`config file not found: ${path}`]);
+    if (err.code === 'ENOENT' && optional) return undefined;
+    if (err.code === 'ENOENT') {
+      problems.push(`${label}: file not found`);
+      return undefined;
+    }
     throw err;
   }
-  let raw;
   try {
-    raw = JSON.parse(text);
+    // Some Windows editors save a byte-order mark, which JSON.parse rejects.
+    return JSON.parse(text.replace(/^﻿/, ''));
   } catch (err) {
-    throw new ConfigError([`${path} is not valid JSON: ${err.message}`]);
+    problems.push(`${label}: not valid JSON (${err.message})`);
+    return undefined;
   }
-  return parseConfig(raw);
 }
 
 /**
@@ -97,8 +148,10 @@ export function parseConfig(raw) {
   }
 
   const calculators = [];
-  if (!Array.isArray(raw.calculators) || raw.calculators.length === 0) {
-    problems.push('calculators: expected a non-empty list');
+  // An empty list is allowed: the service runs and does nothing until the
+  // first calculator file is added.
+  if (!Array.isArray(raw.calculators)) {
+    problems.push('calculators: expected a list');
   } else {
     const calculatorIds = new Set();
     raw.calculators.forEach((rawCalc, ci) => {
@@ -107,12 +160,16 @@ export function parseConfig(raw) {
         problems.push(`${where}: expected an object`);
         return;
       }
-      if (typeof rawCalc.id === 'string') where = `calculator "${rawCalc.id}"`;
+      // Name problems after the file when loaded from a directory, since
+      // that is where they need fixing.
+      if (typeof rawCalc.$file === 'string') where = rawCalc.$file;
+      else if (typeof rawCalc.id === 'string') where = `calculator "${rawCalc.id}"`;
       checkFields(rawCalc, CALCULATOR_FIELDS, where, problems);
       checkId(rawCalc.id, `${where}.id`, calculatorIds, problems);
 
       const calc = {
         id: rawCalc.id,
+        file: rawCalc.$file ?? null,
         name: typeof rawCalc.name === 'string' && rawCalc.name.trim() ? rawCalc.name : String(rawCalc.id),
         appliesWhen: compileField(rawCalc.appliesWhen, `${where}.appliesWhen`, inputProperties),
         lineItems: [],
@@ -192,7 +249,7 @@ function checkId(value, where, seen, problems) {
     problems.push(`${where}: expected letters, numbers, "-" or "_" (got ${JSON.stringify(value)})`);
     return;
   }
-  if (seen.has(value)) problems.push(`${where}: "${value}" is used more than once`);
+  if (seen.has(value)) problems.push(`${where}: "${value}" is already used; ids and keys must be unique`);
   seen.add(value);
 }
 

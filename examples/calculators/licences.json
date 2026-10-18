@@ -1,0 +1,31 @@
+{
+  "$comment": "EXAMPLE. Copy into config/calculators/ and replace the deal property names and SKUs with your own.",
+  "id": "licences",
+  "name": "Licence calculator",
+  "appliesWhen": "licence_seats > 0",
+  "lineItems": [
+    {
+      "key": "seats",
+      "$comment": "Price per seat comes from the calculator.",
+      "product": { "sku": "LIC-SEAT" },
+      "quantity": "licence_seats",
+      "unitPrice": "licence_price_per_seat",
+      "name": "Licences ({{licence_seats}} seats)"
+    },
+    {
+      "key": "support",
+      "$comment": "One premium support pack per 25 seats, rounded up; only on premium deals. No price set, so the product library price is used.",
+      "product": { "sku": "SUP-PREMIUM" },
+      "includeWhen": "support_tier == \"premium\"",
+      "quantity": "ceil(licence_seats / 25)"
+    },
+    {
+      "key": "onboarding",
+      "$comment": "The calculator outputs a total; it is divided by the quantity for the unit price. Left off when the fee is 0.",
+      "product": { "sku": "SVC-ONBOARD" },
+      "includeWhen": "coalesce(onboarding_fee, 0) > 0",
+      "quantity": 1,
+      "totalPrice": "onboarding_fee"
+    }
+  ]
+}

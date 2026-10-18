@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
+    "new-calculator": "node src/cli.js new-calculator",
     "check": "node src/cli.js check",
     "setup": "node src/cli.js setup",
     "plan": "node src/cli.js plan",

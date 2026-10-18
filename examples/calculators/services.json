@@ -1,0 +1,22 @@
+{
+  "$comment": "EXAMPLE. Copy into config/calculators/ and replace the deal property names and SKUs with your own.",
+  "id": "services",
+  "name": "Services calculator",
+  "appliesWhen": "services_days > 0",
+  "lineItems": [
+    {
+      "key": "days",
+      "product": { "sku": "SVC-DAY" },
+      "quantity": "services_days",
+      "unitPrice": "services_day_rate",
+      "name": "Consultancy ({{services_days}} days)"
+    },
+    {
+      "key": "travel",
+      "$comment": "services_options is a multiple-checkbox property; travel is only added when \"on_site\" is ticked. A quantity of 0 leaves the line off.",
+      "product": { "sku": "SVC-TRAVEL" },
+      "includeWhen": "hasOption(services_options, \"on_site\")",
+      "quantity": "coalesce(services_site_visits, 0)"
+    }
+  ]
+}

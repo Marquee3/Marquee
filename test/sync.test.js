@@ -9,33 +9,33 @@ const CONFIG = {
   settings: { syncWhen: 'dealstage != "closedwon"' },
   calculators: [
     {
-      id: 'marquee',
-      name: 'Marquee calculator',
-      appliesWhen: 'width > 0 && length > 0',
+      id: 'hardware',
+      name: 'Hardware calculator',
+      appliesWhen: 'rooms > 0 && units_per_room > 0',
       lineItems: [
-        { key: 'structure', product: { sku: 'MQ-STRUCTURE' }, quantity: 'width * length', unitPrice: 'rate' },
-        { key: 'lighting', product: { sku: 'MQ-LIGHT' }, quantity: 'ceil(width * length / 20)' },
+        { key: 'units', product: { sku: 'HW-UNIT' }, quantity: 'rooms * units_per_room', unitPrice: 'unit_rate' },
+        { key: 'mounts', product: { sku: 'HW-MOUNT' }, quantity: 'ceil(rooms * units_per_room / 20)' },
       ],
     },
     {
-      id: 'furniture',
-      name: 'Furniture calculator',
-      appliesWhen: 'guests > 0',
-      lineItems: [{ key: 'chairs', product: { sku: 'FURN-CHAIR' }, quantity: 'guests' }],
+      id: 'licences',
+      name: 'Licence calculator',
+      appliesWhen: 'users > 0',
+      lineItems: [{ key: 'seats', product: { sku: 'LIC-SEAT' }, quantity: 'users' }],
     },
   ],
 };
 
 const PRODUCTS = [
-  { id: '1', hs_sku: 'MQ-STRUCTURE', name: 'Marquee structure', price: '0' },
-  { id: '2', hs_sku: 'MQ-LIGHT', name: 'Lighting rig', price: '45' },
-  { id: '3', hs_sku: 'FURN-CHAIR', name: 'Chair', price: '2.5' },
-  { id: '4', hs_sku: 'MQ-LIGHT-LED', name: 'LED lighting rig', price: '60' },
+  { id: '1', hs_sku: 'HW-UNIT', name: 'Hardware unit', price: '0' },
+  { id: '2', hs_sku: 'HW-MOUNT', name: 'Wall mount', price: '45' },
+  { id: '3', hs_sku: 'LIC-SEAT', name: 'Licence seat', price: '2.5' },
+  { id: '4', hs_sku: 'HW-MOUNT-PRO', name: 'Pro wall mount', price: '60' },
 ];
 
 function setup(dealProperties = {}, { config = CONFIG } = {}) {
   const hubspot = new FakeHubSpot({
-    deals: { 7: { dealstage: 'qualified', width: '6', length: '12', rate: '9.5', guests: '80', ...dealProperties } },
+    deals: { 7: { dealstage: 'qualified', rooms: '6', units_per_room: '12', unit_rate: '9.5', users: '80', ...dealProperties } },
     products: PRODUCTS,
   });
   const sync = new LineItemSync({
@@ -58,14 +58,14 @@ test('creates line items from calculator output and marks the deal ready for rev
 
   assert.equal(result.outcome, 'synced');
   assert.deepEqual(lines(), [
-    { key: 'furniture:chairs', product: '3', quantity: '80', price: '2.5' },
-    { key: 'marquee:lighting', product: '2', quantity: '4', price: '45' },
-    { key: 'marquee:structure', product: '1', quantity: '72', price: '9.5' },
+    { key: 'hardware:mounts', product: '2', quantity: '4', price: '45' },
+    { key: 'hardware:units', product: '1', quantity: '72', price: '9.5' },
+    { key: 'licences:seats', product: '3', quantity: '80', price: '2.5' },
   ]);
   assert.equal(deal().calc_line_items_status, 'synced');
   assert.equal(
     deal().calc_line_items_message,
-    'Added 3 line items from Marquee calculator and Furniture calculator. Review them, then create the quote.',
+    'Added 3 line items from Hardware calculator and Licence calculator. Review them, then create the quote.',
   );
   assert.equal(deal().calc_line_items_synced_at, '2026-10-16T12:00:00.000Z');
   assert.match(deal().calc_line_items_fingerprint, /^[0-9a-f]{32}$/);
@@ -87,17 +87,17 @@ test('running again creates no duplicates and makes no writes', async () => {
 test('a calculator change updates, adds and removes only what changed', async () => {
   const { hubspot, sync, deal, lines } = setup();
   await sync.syncDeal('7');
-  Object.assign(hubspot.deals.get('7').properties, { width: '8', guests: '' });
+  Object.assign(hubspot.deals.get('7').properties, { rooms: '8', users: '' });
 
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'synced');
   assert.deepEqual(lines(), [
-    { key: 'marquee:lighting', product: '2', quantity: '5', price: '45' },
-    { key: 'marquee:structure', product: '1', quantity: '96', price: '9.5' },
+    { key: 'hardware:mounts', product: '2', quantity: '5', price: '45' },
+    { key: 'hardware:units', product: '1', quantity: '96', price: '9.5' },
   ]);
   assert.equal(
     deal().calc_line_items_message,
-    'Updated 2 and removed 1 line items from Marquee calculator and Furniture calculator. Review them, then create the quote.',
+    'Updated 2 and removed 1 line items from Hardware calculator and Licence calculator. Review them, then create the quote.',
   );
 });
 
@@ -105,7 +105,7 @@ test('manually added line items are never touched', async () => {
   const { hubspot, sync } = setup();
   const manualId = hubspot.addLineItem('7', { hs_product_id: '99', quantity: '1', name: 'Delivery' });
   await sync.syncDeal('7');
-  Object.assign(hubspot.deals.get('7').properties, { width: '', guests: '' });
+  Object.assign(hubspot.deals.get('7').properties, { rooms: '', users: '' });
   await sync.syncDeal('7');
 
   assert.deepEqual(hubspot.dealLineItems('7').map((li) => li.id), [manualId]);
@@ -114,30 +114,30 @@ test('manually added line items are never touched', async () => {
 test('team edits outside the managed fields survive a re-sync', async () => {
   const { hubspot, sync } = setup();
   await sync.syncDeal('7');
-  const chairs = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'furniture:chairs');
-  chairs.properties.hs_discount_percentage = '10';
-  hubspot.deals.get('7').properties.guests = '90';
+  const seats = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'licences:seats');
+  seats.properties.hs_discount_percentage = '10';
+  hubspot.deals.get('7').properties.users = '90';
   await sync.syncDeal('7');
 
-  assert.equal(chairs.properties.quantity, '90');
-  assert.equal(chairs.properties.hs_discount_percentage, '10');
+  assert.equal(seats.properties.quantity, '90');
+  assert.equal(seats.properties.hs_discount_percentage, '10');
 });
 
 test('a product change replaces the line item', async () => {
   const config = structuredClone(CONFIG);
   const { hubspot, sync } = setup({}, { config });
   await sync.syncDeal('7');
-  const oldId = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'marquee:lighting').id;
+  const oldId = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'hardware:mounts').id;
 
-  config.calculators[0].lineItems[1].product.sku = 'MQ-LIGHT-LED';
+  config.calculators[0].lineItems[1].product.sku = 'HW-MOUNT-PRO';
   const sync2 = new LineItemSync({ hubspot, config: parseConfig(config), products: new ProductResolver(hubspot) });
   const result = await sync2.syncDeal('7');
 
-  const lighting = hubspot.dealLineItems('7').filter((li) => li.properties.calc_line_key === 'marquee:lighting');
-  assert.equal(lighting.length, 1);
-  assert.notEqual(lighting[0].id, oldId);
-  assert.equal(lighting[0].properties.hs_product_id, '4');
-  assert.match(result.message, /^Swapped the product on 1 line item from Marquee calculator\./);
+  const mounts = hubspot.dealLineItems('7').filter((li) => li.properties.calc_line_key === 'hardware:mounts');
+  assert.equal(mounts.length, 1);
+  assert.notEqual(mounts[0].id, oldId);
+  assert.equal(mounts[0].properties.hs_product_id, '4');
+  assert.match(result.message, /^Swapped the product on 1 line item from Hardware calculator\./);
 });
 
 test('two syncs racing on the same deal end with one copy of each line', async () => {
@@ -158,10 +158,10 @@ test('two syncs racing on the same deal end with one copy of each line', async (
 });
 
 test('existing duplicates are cleaned up', async () => {
-  const { hubspot, sync, lines } = setup({ guests: '', width: '' });
-  hubspot.addLineItem('7', { calc_line_key: 'furniture:chairs', hs_product_id: '3', quantity: '5' });
-  hubspot.addLineItem('7', { calc_line_key: 'furniture:chairs', hs_product_id: '3', quantity: '5' });
-  hubspot.deals.get('7').properties.guests = '5';
+  const { hubspot, sync, lines } = setup({ users: '', rooms: '' });
+  hubspot.addLineItem('7', { calc_line_key: 'licences:seats', hs_product_id: '3', quantity: '5' });
+  hubspot.addLineItem('7', { calc_line_key: 'licences:seats', hs_product_id: '3', quantity: '5' });
+  hubspot.deals.get('7').properties.users = '5';
 
   const result = await sync.syncDeal('7');
   assert.equal(lines().length, 1);
@@ -169,13 +169,13 @@ test('existing duplicates are cleaned up', async () => {
 });
 
 test('missing calculator inputs: nothing changes and the deal says why', async () => {
-  const { hubspot, sync, deal } = setup({ rate: '' });
+  const { hubspot, sync, deal } = setup({ unit_rate: '' });
   const result = await sync.syncDeal('7');
 
   assert.equal(result.outcome, 'error');
   assert.deepEqual(hubspot.writeCalls(), []);
   assert.equal(deal().calc_line_items_status, 'error');
-  assert.match(deal().calc_line_items_message, /Marquee calculator › structure: unitPrice: deal property "rate" is empty/);
+  assert.match(deal().calc_line_items_message, /Hardware calculator › units: unitPrice: deal property "unit_rate" is empty/);
 });
 
 test('unknown SKU is reported', async () => {
@@ -204,11 +204,11 @@ test('deals with a quote are not changed', async () => {
   const { hubspot, sync, deal, lines } = setup();
   await sync.syncDeal('7');
   hubspot.quotes.set('7', ['555']);
-  hubspot.deals.get('7').properties.guests = '120';
+  hubspot.deals.get('7').properties.users = '120';
 
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'skipped');
-  assert.equal(lines().find((l) => l.key === 'furniture:chairs').quantity, '80');
+  assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '80');
   assert.match(deal().calc_line_items_message, /already has a quote/);
 });
 
@@ -220,16 +220,16 @@ test('deals outside syncWhen are skipped without writing anything', async () => 
 });
 
 test('deals no calculator applies to are left untouched', async () => {
-  const { hubspot, sync } = setup({ width: '', guests: '' });
+  const { hubspot, sync } = setup({ rooms: '', users: '' });
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'noop');
   assert.deepEqual(hubspot.calls.filter((c) => c.name === 'updateDeal'), []);
 });
 
 test('an error is cleared once the inputs are fixed', async () => {
-  const { hubspot, sync, deal } = setup({ rate: '' });
+  const { hubspot, sync, deal } = setup({ unit_rate: '' });
   await sync.syncDeal('7');
-  hubspot.deals.get('7').properties.rate = '9.5';
+  hubspot.deals.get('7').properties.unit_rate = '9.5';
   assert.equal((await sync.syncDeal('7')).outcome, 'synced');
   assert.equal(deal().calc_line_items_status, 'synced');
 });
@@ -247,8 +247,8 @@ test('force re-applies even when the fingerprint matches', async () => {
   const { hubspot, sync } = setup();
   await sync.syncDeal('7');
   // Someone deleted a calculator line by hand; a normal sync respects that.
-  const lighting = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'marquee:lighting');
-  hubspot.lineItems.delete(lighting.id);
+  const mounts = hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'hardware:mounts');
+  hubspot.lineItems.delete(mounts.id);
   assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
   assert.equal((await sync.syncDeal('7', { force: true })).outcome, 'synced');
   assert.equal(hubspot.dealLineItems('7').length, 3);
@@ -285,10 +285,59 @@ test('setLineOrder: false leaves hs_position_on_quote alone', async () => {
 });
 
 test('a broken syncWhen is reported as a config problem', async () => {
-  const config = { ...structuredClone(CONFIG), settings: { syncWhen: 'width * missing > 0' } };
+  const config = { ...structuredClone(CONFIG), settings: { syncWhen: 'rooms * missing > 0' } };
   const { hubspot, sync, deal } = setup({}, { config });
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'error');
   assert.deepEqual(hubspot.writeCalls(), []);
   assert.match(deal().calc_line_items_message, /settings\.syncWhen: deal property "missing" is empty/);
+});
+
+test('deals no calculator applies to cost a single read', async () => {
+  const { hubspot, sync } = setup({ rooms: '', users: '', calc_line_items_frozen: 'true' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'noop');
+  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal']);
+});
+
+test('an unchanged status is not written again', async () => {
+  // Each write changes the deal's last-modified time, so rewriting the same
+  // status would make the poller pick the deal up forever.
+  const { hubspot, sync } = setup({ calc_line_items_frozen: 'true' });
+  await sync.syncDeal('7');
+  await sync.syncDeal('7');
+  assert.equal(hubspot.calls.filter((c) => c.name === 'updateDeal').length, 1);
+
+  const quoted = setup();
+  await quoted.sync.syncDeal('7');
+  quoted.hubspot.quotes.set('7', ['555']);
+  quoted.hubspot.deals.get('7').properties.users = '120';
+  await quoted.sync.syncDeal('7');
+  await quoted.sync.syncDeal('7');
+  assert.equal(quoted.hubspot.calls.filter((c) => c.name === 'updateDeal').length, 2, 'synced once, skipped once');
+
+  const broken = setup({ unit_rate: '' });
+  await broken.sync.syncDeal('7');
+  await broken.sync.syncDeal('7');
+  assert.equal(broken.hubspot.calls.filter((c) => c.name === 'updateDeal').length, 1);
+});
+
+test('a new calculator added to the config is picked up on the next sync', async () => {
+  const { hubspot, sync, lines } = setup();
+  await sync.syncDeal('7');
+  const config = structuredClone(CONFIG);
+  config.calculators.push({
+    id: 'training',
+    name: 'Training calculator',
+    appliesWhen: 'trainees > 0',
+    lineItems: [{ key: 'places', product: { sku: 'TRN-PLACE' }, quantity: 'trainees', unitPrice: 150 }],
+  });
+  hubspot.products.push({ id: '5', properties: { hs_sku: 'TRN-PLACE', name: 'Training place', price: '0' } });
+  hubspot.deals.get('7').properties.trainees = '4';
+  const withTraining = new LineItemSync({ hubspot, config: parseConfig(config), products: new ProductResolver(hubspot) });
+
+  const result = await withTraining.syncDeal('7');
+  assert.equal(result.outcome, 'synced');
+  assert.match(result.message, /^Added 1 line item from Training calculator\./);
+  assert.deepEqual(lines().find((l) => l.key === 'training:places'), { key: 'training:places', product: '5', quantity: '4', price: '150' });
+  assert.equal(lines().length, 4);
 });

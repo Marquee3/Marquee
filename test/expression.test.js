@@ -96,8 +96,8 @@ test('identifiers are collected, excluding function names and keywords', () => {
 });
 
 test('templates', () => {
-  const template = compileTemplate('Marquee {{w}}m x {{l}}m ({{w * l}} m2){{missing}}');
+  const template = compileTemplate('Room {{w}}m x {{l}}m ({{w * l}} m2){{missing}}');
   assert.deepEqual(template.identifiers.sort(), ['l', 'missing', 'w']);
-  assert.equal(template.render(normalizeValues({ w: '6', l: '12.5' })), 'Marquee 6m x 12.5m (75 m2)');
+  assert.equal(template.render(normalizeValues({ w: '6', l: '12.5' })), 'Room 6m x 12.5m (75 m2)');
   assert.equal(compileTemplate('{{0.1 + 0.2}}').render({}), '0.3');
 });

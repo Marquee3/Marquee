@@ -1,5 +1,8 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig, parseConfig } from '../src/config.js';
 import { evaluateCalculators } from '../src/calculators.js';
@@ -18,13 +21,82 @@ const problemsOf = (raw) => {
   return [];
 };
 
-test('the shipped example config is valid', async () => {
-  const config = await loadConfig(fileURLToPath(new URL('../config/calculators.json', import.meta.url)));
-  assert.equal(config.calculators.length, 2);
-  assert.ok(config.inputProperties.includes('marquee_width_m'));
-  assert.ok(!config.inputProperties.includes('dealstage'), 'syncWhen properties are not webhook inputs');
+const tempDirs = [];
+after(() => Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true }))));
+
+async function configDirWith(files) {
+  const dir = await mkdtemp(join(tmpdir(), 'calc-config-'));
+  tempDirs.push(dir);
+  for (const [name, content] of Object.entries(files)) {
+    const path = join(dir, name);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, typeof content === 'string' ? content : JSON.stringify(content));
+  }
+  return dir;
+}
+
+const LINE = { key: 'a', product: { id: '1' }, quantity: 1 };
+
+test('the shipped config loads, with no calculators yet', async () => {
+  const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
+  assert.deepEqual(config.calculators, []);
+  assert.equal(config.settings.skipWhenQuoteExists, true);
+  assert.equal(config.settings.setLineOrder, true);
+});
+
+test('the example calculators are valid', async () => {
+  const config = await loadConfig(fileURLToPath(new URL('../examples', import.meta.url)));
+  assert.deepEqual(config.calculators.map((c) => c.id), ['licences', 'services']);
+  assert.ok(config.inputProperties.includes('licence_seats'));
+  assert.equal(config.skus.length, 5);
+});
+
+test('each file in calculators/ is one calculator, loaded in name order', async () => {
+  const dir = await configDirWith({
+    'calculators/20-second.json': { id: 'second', lineItems: [LINE] },
+    'calculators/10-first.json': { id: 'first', lineItems: [LINE] },
+    'calculators/notes.txt': 'ignored',
+    'calculators/README.md': '# ignored',
+    'settings.json': { syncWhen: 'dealstage != "closedwon"' },
+  });
+  const config = await loadConfig(dir);
+  assert.deepEqual(
+    config.calculators.map((c) => [c.id, c.file]),
+    [['first', 'calculators/10-first.json'], ['second', 'calculators/20-second.json']],
+  );
   assert.ok(config.dealProperties.includes('dealstage'));
-  assert.deepEqual(config.skus.length, 6);
+  assert.ok(!config.inputProperties.includes('dealstage'), 'syncWhen properties are not calculator inputs');
+});
+
+test('a missing folder or settings file just means defaults', async () => {
+  const config = await loadConfig(await configDirWith({}));
+  assert.deepEqual(config.calculators, []);
+  assert.equal(config.settings.skipWhenQuoteExists, true);
+});
+
+test('problems in every file are reported at once, named by file', async () => {
+  const dir = await configDirWith({
+    'calculators/a-good.json': { id: 'same', lineItems: [LINE] },
+    'calculators/b-copy.json': { id: 'same', lineItems: [{ ...LINE, quantity: 'ceil(' }] },
+    'calculators/c-broken.json': '{ "id": ',
+    'calculators/d-list.json': '[]',
+    'settings.json': { skipWhenQuoteExists: 'yes' },
+  });
+  const problems = await loadConfig(dir).then(
+    () => [],
+    (err) => err.problems,
+  );
+  const text = problems.join('\n');
+  assert.match(text, /calculators\/c-broken\.json: not valid JSON/);
+  assert.match(text, /calculators\/d-list\.json: expected a JSON object/);
+  assert.match(text, /calculators\/b-copy\.json\.id: "same" is already used/);
+  assert.match(text, /calculators\/b-copy\.json line "a"\.quantity: Invalid expression "ceil\("/);
+  assert.match(text, /settings\.skipWhenQuoteExists: expected true or false/);
+});
+
+test('settings.json rejects unknown fields', async () => {
+  const dir = await configDirWith({ 'settings.json': { skipWhenQuoteExist: false } });
+  await assert.rejects(loadConfig(dir), /settings: unknown field "skipWhenQuoteExist"/);
 });
 
 test('collects every problem in one pass', () => {
@@ -44,7 +116,7 @@ test('collects every problem in one pass', () => {
   assert.match(text, /calculator "a b"\.id: expected letters/);
   assert.match(text, /set exactly one of "sku" or "id"/);
   assert.match(text, /quantity: Invalid expression "ceil\("/);
-  assert.match(text, /"x" is used more than once/);
+  assert.match(text, /"x" is already used/);
   assert.match(text, /set unitPrice or totalPrice, not both/);
   assert.match(text, /unknown field "quantiy"/);
   assert.match(text, /line "y"\.quantity: required/);
@@ -106,13 +178,13 @@ test('reports every bad line with calculator and field context', () => {
         { key: 'b', product: { id: '1' }, quantity: '0 - 2' },
         { key: 'c', product: { id: '1' }, quantity: 1, unitPrice: '0 - rate' },
       ],
-      { name: 'Marquee calculator' },
+      { name: 'Hardware calculator' },
     ),
   );
   const { errors } = evaluateCalculators(config, { w: '3', rate: '5' });
   assert.deepEqual(errors, [
-    'Marquee calculator › a: quantity: deal property "l" is empty',
-    'Marquee calculator › b: quantity is negative (-2)',
-    "Marquee calculator › c: price is negative (-5); HubSpot line item prices can't be negative",
+    'Hardware calculator › a: quantity: deal property "l" is empty',
+    'Hardware calculator › b: quantity is negative (-2)',
+    "Hardware calculator › c: price is negative (-5); HubSpot line item prices can't be negative",
   ]);
 });

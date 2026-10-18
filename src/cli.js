@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.js';
+import { ConfigError, ID_PATTERN, loadConfig } from './config.js';
 import { HubSpotError } from './hubspot.js';
 import { ProductResolver } from './products.js';
 import { DEAL, LINE_ITEM_KEY, PROPERTY_DEFINITIONS } from './properties.js';
-import { configPath, createClient, loadEnv } from './runtime.js';
+import { configDir, createClient, loadEnv } from './runtime.js';
 import { LineItemSync } from './sync.js';
 import { silentLogger } from './logger.js';
 
@@ -16,6 +16,7 @@ const WEBHOOKS_CONFIG_PATH = fileURLToPath(
 
 const USAGE = `Usage: node src/cli.js <command>
 
+  new-calculator <id> [name]  Start a new calculator: creates config/calculators/<id>.json to fill in.
   check                       Validate the calculator config. With HUBSPOT_ACCESS_TOKEN set, also
                               check the deal properties, products and app properties in HubSpot.
   setup                       Create the deal and line item properties the app uses (safe to re-run).
@@ -23,8 +24,8 @@ const USAGE = `Usage: node src/cli.js <command>
                               without changing anything.
   sync <dealId>... [--force]  Sync deals now. --force re-applies even if the calculator output
                               hasn't changed since the last sync.
-  webhooks [--target-url URL] List the deal properties to subscribe to. With a target URL, also
-                              write the HubSpot project webhook config.
+  webhooks [--target-url URL] Optional, for instant updates: list the deal properties to subscribe
+                              to. With a target URL, also write the HubSpot project webhook config.
 `;
 
 async function main(argv) {
@@ -40,6 +41,9 @@ async function main(argv) {
   };
 
   switch (command) {
+    case 'new-calculator':
+      if (!args.length) return usage();
+      return newCalculator(args[0], args.slice(1).join(' '));
     case 'check':
       return check();
     case 'setup':
@@ -62,12 +66,64 @@ function usage() {
   return 1;
 }
 
+async function newCalculator(id, name) {
+  if (!ID_PATTERN.test(id)) {
+    console.error(`Calculator id "${id}" must be letters, numbers, "-" or "_" (it becomes part of each line item's key).`);
+    return 1;
+  }
+  // A broken calculator file elsewhere shouldn't stop starting a new one.
+  let existing = [];
+  try {
+    existing = (await loadConfig(configDir())).calculators;
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err;
+  }
+  if (existing.some((calc) => calc.id === id)) {
+    console.error(`A calculator with id "${id}" already exists.`);
+    return 1;
+  }
+  const path = join(configDir(), 'calculators', `${id}.json`);
+  const template = {
+    $comment:
+      'Replace the placeholders with your deal property internal names and product SKUs, then run "npm run check" and "npm run plan -- <test deal id>". See README > Adding a calculator.',
+    id,
+    name: name || `${id} calculator`,
+    appliesWhen: 'replace_with_a_deal_property > 0',
+    lineItems: [
+      {
+        key: 'first-line',
+        product: { sku: 'REPLACE-WITH-PRODUCT-SKU' },
+        quantity: 'replace_with_quantity_property',
+        unitPrice: 'replace_with_unit_price_property',
+      },
+    ],
+  };
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    await writeFile(path, `${JSON.stringify(template, null, 2)}\n`, { flag: 'wx' });
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    console.error(`${path} already exists.`);
+    return 1;
+  }
+  const shown = relative(process.cwd(), path);
+  console.log(`Created ${shown.startsWith('..') ? path : shown}. Fill it in, then run "npm run check".`);
+  return 0;
+}
+
 async function check() {
-  const path = configPath();
-  const config = await loadConfig(path);
+  const dir = configDir();
+  const config = await loadConfig(dir);
+  if (!config.calculators.length) {
+    console.log(`No calculators yet in ${join(dir, 'calculators')}.`);
+    console.log('Start one with "npm run new-calculator -- <id> <name>", or copy a file from examples/calculators/.');
+    return 0;
+  }
   const lineCount = config.calculators.reduce((n, c) => n + c.lineItems.length, 0);
-  console.log(`✓ Config is valid: ${config.calculators.length} calculator(s), ${lineCount} line item rule(s) (${path})`);
-  for (const calc of config.calculators) console.log(`    ${calc.id.padEnd(20)} ${calc.name} (${calc.lineItems.length} lines)`);
+  console.log(`✓ Config is valid: ${config.calculators.length} calculator(s), ${lineCount} line item rule(s)`);
+  for (const calc of config.calculators) {
+    console.log(`    ${calc.id.padEnd(20)} ${calc.name} (${calc.lineItems.length} lines, ${calc.file ?? ''})`);
+  }
   console.log(`  Deal properties used: ${config.dealProperties.join(', ') || '(none)'}`);
 
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
@@ -200,10 +256,12 @@ async function sync(dealIds, { force }) {
 }
 
 async function webhooks(targetUrl) {
-  const config = await loadConfig(configPath());
+  const config = await loadConfig(configDir());
   // The freeze checkbox is included so unticking it triggers a re-sync.
   const properties = [...new Set([...config.inputProperties, DEAL.frozen])].sort();
-  console.log('Subscribe to "Deal: property changed" for each of these properties:');
+  console.log('Webhooks are optional: the service already polls HubSpot for changed deals every minute.');
+  console.log('For instant updates, subscribe to "Deal: property changed" for each of these properties');
+  console.log('(and re-run this after adding a calculator):');
   properties.forEach((name) => console.log(`  ${name}`));
 
   if (!targetUrl) {
@@ -238,7 +296,7 @@ function client() {
 }
 
 async function engineFor() {
-  const config = await loadConfig(configPath());
+  const config = await loadConfig(configDir());
   const hubspot = client();
   return new LineItemSync({ hubspot, config, products: new ProductResolver(hubspot), logger: silentLogger });
 }

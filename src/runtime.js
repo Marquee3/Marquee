@@ -6,15 +6,15 @@ import { logger } from './logger.js';
 import { ProductResolver } from './products.js';
 import { LineItemSync } from './sync.js';
 
-export const DEFAULT_CONFIG_PATH = fileURLToPath(new URL('../config/calculators.json', import.meta.url));
+export const DEFAULT_CONFIG_DIR = fileURLToPath(new URL('../config', import.meta.url));
 
 /** Load a .env file into process.env if there is one (existing variables win). */
 export function loadEnv(path = '.env') {
   if (existsSync(path)) process.loadEnvFile(path);
 }
 
-export function configPath(env = process.env) {
-  return env.CALCULATORS_CONFIG || DEFAULT_CONFIG_PATH;
+export function configDir(env = process.env) {
+  return env.CONFIG_DIR || DEFAULT_CONFIG_DIR;
 }
 
 export function createClient(env = process.env) {
@@ -26,7 +26,7 @@ export function createClient(env = process.env) {
 }
 
 export async function createApp(env = process.env) {
-  const config = await loadConfig(configPath(env));
+  const config = await loadConfig(configDir(env));
   const hubspot = createClient(env);
   const products = new ProductResolver(hubspot);
   const sync = new LineItemSync({ hubspot, config, products, logger });
@@ -43,5 +43,8 @@ export function readServerSettings(env = process.env) {
     allowUnsigned: env.ALLOW_UNSIGNED_WEBHOOKS === 'true',
     debounceMs: Number(env.SYNC_DEBOUNCE_MS || 5000),
     concurrency: Number(env.SYNC_CONCURRENCY || 2),
+    // 0 turns the poller off (webhooks only).
+    pollSeconds: Number(env.SYNC_POLL_SECONDS ?? 60),
+    pollLookbackMinutes: Number(env.SYNC_POLL_LOOKBACK_MINUTES || 60),
   };
 }

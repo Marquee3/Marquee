@@ -46,7 +46,8 @@ export const PROPERTY_DEFINITIONS = {
     },
     {
       name: DEAL.syncedAt,
-      label: 'Calculator line items: last synced',
+      label: 'Calculator line items: last updated',
+      description: 'When the status or details last changed.',
       groupName: 'dealinformation',
       type: 'datetime',
       fieldType: 'date',

@@ -3,8 +3,8 @@
 // Expressions reference deal properties by their internal name and support
 // arithmetic, comparisons, && / || / !, and a handful of functions:
 //
-//   ceil(marquee_width_m * marquee_length_m / 20)
-//   guest_count > 0 && hasOption(extras, "dance_floor")
+//   ceil(licence_seats / 25)
+//   services_days > 0 && hasOption(services_options, "on_site")
 //   if(tier == "premium", 2, 1)
 //
 // Nothing is passed to eval(): source is tokenized, parsed into a tree and
@@ -62,7 +62,7 @@ export function compile(source) {
 }
 
 /**
- * Compile a text template such as "Installation ({{marquee_width_m}}m wide)".
+ * Compile a text template such as "Consultancy ({{services_days}} days)".
  * Each {{ }} holds an expression.
  */
 export function compileTemplate(source) {
@@ -409,7 +409,7 @@ function looseEquals(a, b) {
 }
 
 function compareValues(a, b, op) {
-  // Comparisons with a blank value are false, so "guest_count > 0" is simply
+  // Comparisons with a blank value are false, so "licence_seats > 0" is simply
   // false on deals where the calculator hasn't been filled in.
   if (a === null || b === null) return false;
   const na = asNumber(a);
