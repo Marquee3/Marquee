@@ -77,7 +77,7 @@ test('check warns about a calculator that applies to every deal', async () => {
 });
 
 // A tiny HubSpot stand-in for the token and property checks.
-async function withFakeHubSpot({ scopes, status = 200 }, fn) {
+async function withFakeHubSpot({ scopes, status = 200, dealProperties = null, products = [] }, fn) {
   const { createServer } = await import('node:http');
   const server = createServer(async (req, res) => {
     for await (const _ of req);
@@ -85,9 +85,16 @@ async function withFakeHubSpot({ scopes, status = 200 }, fn) {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.url === '/oauth/v2/private-apps/get/access-token-info') {
+    const path = new URL(req.url, 'http://x').pathname;
+    if (path === '/oauth/v2/private-apps/get/access-token-info') {
       return status === 200 ? send(200, { hubId: 4242, appId: 77, userId: 1, scopes }) : send(status, { message: 'Authentication credentials not found' });
     }
+    if (path.startsWith('/crm/properties/2026-09/')) {
+      if (!dealProperties) return send(403, { message: 'This app hasn\'t been granted all required scopes', category: 'MISSING_SCOPES' });
+      return send(200, { results: path.endsWith('/deals') ? dealProperties : [{ name: 'calc_line_key' }] });
+    }
+    if (path === '/crm/objects/2026-09/products' && req.method === 'GET') return send(200, { results: products });
+    if (path === '/crm/objects/2026-09/products/search') return send(200, { results: products });
     send(404, { message: 'not in this fake' });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -140,5 +147,45 @@ test('check says clearly when HubSpot rejects the token', async () => {
     const result = await cliWithToken(['check'], await emptyConfig(), base);
     assert.equal(result.code, 1);
     assert.match(result.stdout, /HubSpot rejected the access token \(401\)/);
+  });
+});
+
+test('check skips property checks (instead of stopping) when the token can\'t read properties', async () => {
+  const dir = await emptyConfig();
+  await writeFile(join(dir, 'calculators', 'fee.json'), JSON.stringify({ id: 'fee', appliesWhen: 'seats > 0', lineItems: [{ key: 'x', product: { sku: 'FEE' }, quantity: 'seats' }] }));
+  const scopes = ALL_SCOPES.filter((s) => !s.startsWith('crm.schemas'));
+  const products = [{ id: '5', properties: { name: 'Fee', hs_sku: 'FEE', price: '10' } }];
+  await withFakeHubSpot({ scopes, products }, async (base) => {
+    const result = await cliWithToken(['check'], dir, base);
+    assert.match(result.stdout, /Skipped checking deal properties: the token lacks crm\.schemas\.deals\.read/);
+    assert.match(result.stdout, /SKU FEE → product 5/);
+    assert.equal(result.code, 0, result.stdout);
+  });
+});
+
+test('inspect lists custom deal properties and products', async () => {
+  const dealProperties = [
+    { name: 'dealname', label: 'Deal name', type: 'string', fieldType: 'text', groupName: 'dealinformation', hubspotDefined: true },
+    { name: 'licence_seats', label: 'Seats', type: 'number', fieldType: 'number', groupName: 'calculator' },
+    { name: 'support_tier', label: 'Support tier', type: 'enumeration', fieldType: 'select', groupName: 'calculator', options: [{ value: 'standard' }, { value: 'premium' }] },
+    { name: 'calc_line_items_status', label: 'Calculator line items: status', type: 'enumeration', fieldType: 'select', groupName: 'dealinformation' },
+  ];
+  const products = [{ id: '5', properties: { name: 'Licence seat', hs_sku: 'LIC-SEAT', price: '15' } }, { id: '6', properties: { name: 'Setup', price: '100' } }];
+  await withFakeHubSpot({ scopes: ALL_SCOPES, dealProperties, products }, async (base) => {
+    const result = await cliWithToken(['inspect'], await emptyConfig(), base);
+    assert.equal(result.code, 0, result.stdout);
+    assert.match(result.stdout, /licence_seats\s+Seats\s+number\/number/);
+    assert.match(result.stdout, /support_tier .*options: standard, premium/);
+    assert.doesNotMatch(result.stdout, /dealname|calc_line_items_status/);
+    assert.match(result.stdout, /Licence seat\s+SKU LIC-SEAT/);
+    assert.match(result.stdout, /1 product\(s\) have no SKU/);
+  });
+});
+
+test('inspect explains a missing permission', async () => {
+  await withFakeHubSpot({ scopes: [] }, async (base) => {
+    const result = await cliWithToken(['inspect'], await emptyConfig(), base);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /lacks crm\.schemas\.deals\.read/);
   });
 });

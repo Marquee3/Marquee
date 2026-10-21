@@ -12,6 +12,7 @@
     "new-calculator": "node src/cli.js new-calculator",
     "check": "node src/cli.js check",
     "setup": "node src/cli.js setup",
+    "inspect": "node src/cli.js inspect",
     "plan": "node src/cli.js plan",
     "sync": "node src/cli.js sync",
     "webhooks": "node src/cli.js webhooks",

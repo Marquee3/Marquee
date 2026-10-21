@@ -61,7 +61,9 @@ export class LineItemSync {
     try {
       return this.#log(await this.#sync(deal, { dryRun, force }));
     } catch (err) {
-      const message = `Line items may be only partly updated: ${describeError(err)}`;
+      // fingerprintAfterFailure is only set once applying changes had started.
+      const started = err?.fingerprintAfterFailure !== undefined;
+      const message = `${started ? 'Line items may be only partly updated' : 'Line items were not changed'}: ${describeError(err)}`;
       // If applying had started, the lines being changed are in an unknown
       // state: forget just their fingerprints so the next sync re-checks
       // them. Otherwise the stored fingerprint still describes what's on the
@@ -274,6 +276,9 @@ function isTransient(err) {
 
 function describeError(err) {
   const message = err?.message ?? String(err);
+  if (err instanceof HubSpotError && err.status === 403) {
+    return `${message} (the access token lacks a permission this needs; "npm run check" lists what's missing)`;
+  }
   if (/calc_line|PROPERTY_DOESNT_EXIST|does not exist/i.test(message)) {
     return `${message} (have the app's custom properties been created? Run "npm run setup".)`;
   }

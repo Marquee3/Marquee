@@ -136,3 +136,13 @@ test('reads the token\'s own account and permissions', async () => {
   assert.equal(requests[0].url.pathname, '/oauth/v2/private-apps/get/access-token-info');
   assert.deepEqual(requests[0].body, { tokenKey: 'pat-123' });
 });
+
+test('lists every product, page by page', async () => {
+  const { fetch, requests } = fakeFetch((req) =>
+    req.url.searchParams.get('after') ? { body: { results: [{ id: '3' }] } } : { body: { results: [{ id: '1' }, { id: '2' }], paging: { next: { after: 'x' } } } },
+  );
+  const products = await clientWith(fetch).listProducts();
+  assert.deepEqual(products.map((p) => p.id), ['1', '2', '3']);
+  assert.equal(requests[0].url.pathname, '/crm/objects/2026-09/products');
+  assert.equal(requests[0].url.searchParams.get('properties'), 'name,hs_sku,price');
+});

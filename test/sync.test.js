@@ -604,3 +604,19 @@ test('plan (a dry run) lists lines from removed calculators even after later syn
   assert.deepEqual(plan.plan.orphans.map((o) => o.key), ['licences:seats']);
   assert.equal(plan.outcome, 'unchanged');
 });
+
+test('a missing permission is reported as such, and says nothing was changed', async () => {
+  const { hubspot, sync, deal } = setup();
+  const { HubSpotError } = await import('../src/hubspot.js');
+  const real = hubspot.getAssociatedIds.bind(hubspot);
+  hubspot.getAssociatedIds = async (from, id, to, opts) => {
+    if (to === 'quotes') throw new HubSpotError({ status: 403, method: 'POST', path: '/crm/associations/2026-09/deals/quotes/batch/read', body: { message: 'This app hasn\'t been granted all required scopes' } });
+    return real(from, id, to, opts);
+  };
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'error');
+  assert.equal(result.retry, false);
+  assert.match(result.message, /^Line items were not changed: .*\(403\).*lacks a permission.*npm run check/);
+  assert.equal(hubspot.dealLineItems('7').length, 0);
+  assert.equal(deal().calc_line_items_status, 'error');
+});

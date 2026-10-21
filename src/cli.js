@@ -23,6 +23,8 @@ const USAGE = `Usage: node src/cli.js <command>   (or npm run <command> -- <args
   check                        Validate the calculator config. With HUBSPOT_ACCESS_TOKEN set, also
                                check the deal properties, products and app properties in HubSpot.
   setup                        Create the deal and line item properties the app uses (safe to re-run).
+  inspect                      List the account's custom deal properties and products (with SKUs),
+                               for writing calculator files. Read-only.
   plan <dealId> [--force]      Show the line items a sync would produce and what it would change,
                                without changing anything.
   sync <dealId>...             Sync these deals now.
@@ -56,6 +58,8 @@ async function main(argv) {
       return check();
     case 'setup':
       return setup();
+    case 'inspect':
+      return inspect();
     case 'plan':
       if (args.length !== 1) return usage();
       return plan(args[0], { force: flags.has('--force') });
@@ -164,33 +168,33 @@ async function check() {
     console.log(`✗ ${message}`);
   };
 
-  const dealProperties = new Map((await hubspot.getProperties('deals')).map((p) => [p.name, p]));
-  const missing = config.dealProperties.filter((name) => !dealProperties.has(name));
-  if (missing.length) fail(`Deal properties not found in HubSpot: ${missing.join(', ')}`);
-  else console.log('✓ All deal properties used by the config exist');
+  // Reading property definitions needs the crm.schemas.* permissions; without
+  // them, skip these checks rather than stop.
+  const dealProperties = await readProperties(hubspot, 'deals', 'crm.schemas.deals.read');
+  if (dealProperties) {
+    const missing = config.dealProperties.filter((name) => !dealProperties.has(name));
+    if (missing.length) fail(`Deal properties not found in HubSpot: ${missing.join(', ')}`);
+    else console.log('✓ All deal properties used by the config exist');
 
-  const calculated = config.inputProperties.filter((name) => {
-    const p = dealProperties.get(name);
-    return p && (p.calculated === true || String(p.fieldType).startsWith('calculation'));
-  });
-  if (calculated.length) {
-    console.log(
-      `! These are HubSpot calculation properties: ${calculated.join(', ')}. Polling picks up their changes, ` +
-        'but HubSpot may not send webhooks for them; if you use webhooks, also subscribe to the properties they are calculated from.',
-    );
+    const calculated = config.inputProperties.filter((name) => {
+      const p = dealProperties.get(name);
+      return p && (p.calculated === true || String(p.fieldType).startsWith('calculation'));
+    });
+    if (calculated.length) {
+      console.log(
+        `! These are HubSpot calculation properties: ${calculated.join(', ')}. Polling picks up their changes, ` +
+          'but HubSpot may not send webhooks for them; if you use webhooks, also subscribe to the properties they are calculated from.',
+      );
+    }
   }
 
-  const appDealProps = Object.values(DEAL).filter((name) => !dealProperties.has(name));
-  let lineItemProps = null;
-  try {
-    lineItemProps = new Set((await hubspot.getProperties('line_items')).map((p) => p.name));
-  } catch (err) {
-    if (!(err instanceof HubSpotError && err.status === 403)) throw err;
-    console.log(`! Couldn't read line item properties (${err.message}). Add the crm.schemas.line_items.read scope, or check "${LINE_ITEM_KEY}" exists by hand.`);
-  }
-  const missingApp = [...appDealProps, ...(lineItemProps && !lineItemProps.has(LINE_ITEM_KEY) ? [LINE_ITEM_KEY] : [])];
-  if (missingApp.length) fail(`App properties missing: ${missingApp.join(', ')}. Run "npm run setup".`);
-  else console.log('✓ App properties exist');
+  const lineItemProps = await readProperties(hubspot, 'line_items', 'crm.schemas.line_items.read');
+  const missingApp = [
+    ...(dealProperties ? Object.values(DEAL).filter((name) => !dealProperties.has(name)) : []),
+    ...(lineItemProps && !lineItemProps.has(LINE_ITEM_KEY) ? [LINE_ITEM_KEY] : []),
+  ];
+  if (missingApp.length) fail(`App properties missing: ${missingApp.join(', ')}. Run "npm run setup", or create them by hand (see README).`);
+  else if (dealProperties && lineItemProps) console.log('✓ App properties exist');
 
   if (config.skus.length) {
     const { products, errors } = await new ProductResolver(hubspot).resolve(config.skus);
@@ -237,6 +241,68 @@ async function checkToken(hubspot) {
     console.log(`! Token is missing permissions for "npm run setup" and these checks: ${describe(missingSetup)}. Add them, or create the properties by hand (see README).`);
   }
   return missing.length ? 1 : 0;
+}
+
+/** Property definitions by name, or null (with a note) if the token can't read them. */
+async function readProperties(hubspot, objectType, scope) {
+  try {
+    return new Map((await hubspot.getProperties(objectType)).map((p) => [p.name, p]));
+  } catch (err) {
+    if (!(err instanceof HubSpotError && err.status === 403)) throw err;
+    const what = objectType === 'deals' ? 'deal' : 'line item';
+    console.log(`! Skipped checking ${what} properties: the token lacks ${scope}.`);
+    return null;
+  }
+}
+
+/**
+ * List what's needed to write calculator files: the account's custom deal
+ * properties (internal names, types) and its products (SKUs, prices).
+ * Read-only. The output holds no secrets.
+ */
+async function inspect() {
+  const hubspot = client();
+  let problems = 0;
+
+  console.log('Custom deal properties (use the internal name in calculator files):\n');
+  try {
+    const own = new Set(Object.values(DEAL));
+    const custom = (await hubspot.getProperties('deals'))
+      .filter((p) => !p.hubspotDefined && !own.has(p.name) && !p.archived)
+      .sort((a, b) => String(a.groupName).localeCompare(String(b.groupName)) || a.name.localeCompare(b.name));
+    if (!custom.length) console.log('  (none)');
+    let group = null;
+    for (const p of custom) {
+      if (p.groupName !== group) {
+        group = p.groupName;
+        console.log(`  [${group}]`);
+      }
+      const kind = p.calculated || String(p.fieldType).startsWith('calculation') ? `${p.type}, calculated` : `${p.type}/${p.fieldType}`;
+      const options = p.options?.length ? `  options: ${p.options.map((o) => o.value).slice(0, 12).join(', ')}${p.options.length > 12 ? ', …' : ''}` : '';
+      console.log(`    ${p.name.padEnd(40)} ${String(p.label).padEnd(40)} ${kind}${options}`);
+    }
+  } catch (err) {
+    if (!(err instanceof HubSpotError && err.status === 403)) throw err;
+    problems++;
+    console.log('  ✗ The token lacks crm.schemas.deals.read, so deal properties can\'t be listed.');
+  }
+
+  console.log('\nProducts (reference these by SKU in calculator files):\n');
+  try {
+    const products = await hubspot.listProducts();
+    if (!products.length) console.log('  (none)');
+    for (const p of products.sort((a, b) => String(a.properties?.name).localeCompare(String(b.properties?.name)))) {
+      const sku = p.properties?.hs_sku || '(no SKU)';
+      console.log(`    ${String(p.properties?.name ?? '').padEnd(44)} SKU ${String(sku).padEnd(24)} price ${p.properties?.price ?? '-'}   id ${p.id}`);
+    }
+    const noSku = products.filter((p) => !p.properties?.hs_sku).length;
+    if (noSku) console.log(`\n  ${noSku} product(s) have no SKU: give them one, or reference them by id.`);
+  } catch (err) {
+    if (!(err instanceof HubSpotError && err.status === 403)) throw err;
+    problems++;
+    console.log('  ✗ The token lacks permission to read products (e-commerce).');
+  }
+  return problems ? 1 : 0;
 }
 
 async function setup() {

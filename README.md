@@ -89,8 +89,9 @@ A calculator here is whatever puts numbers on a deal: a HubSpot calculation prop
 workflow, an external pricing tool. The service only needs those numbers to land in **deal
 properties**. To support a new one:
 
-1. **Make sure its outputs are deal properties**, and note their *internal* names (Settings →
-   Properties → the property → internal name).
+1. **Make sure its outputs are deal properties**, and note their *internal* names.
+   `npm run inspect` lists every custom deal property with its internal name and type, and every
+   product with its SKU (or see Settings → Properties in HubSpot).
 2. **Make sure its products are in the product library** with a SKU (or note their product IDs).
 3. **Create the calculator file:**
 
@@ -181,6 +182,7 @@ npm install                       # installs Wrangler (Cloudflare's CLI); the se
 cp .env.example .env              # add HUBSPOT_ACCESS_TOKEN, for the commands below
 npm test                          # unit tests, no HubSpot needed
 npm run setup                     # create the app's deal + line item properties (safe to re-run)
+npm run inspect                   # list custom deal properties and products, for writing calculators
 npm run new-calculator -- …       # add your first calculator (see above)
 npm run check                     # token's account and permissions; config valid; properties and SKUs exist?
 npm run plan -- 123456789         # dry run on a real deal: shows the lines and changes, writes nothing

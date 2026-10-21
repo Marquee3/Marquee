@@ -228,6 +228,20 @@ export class HubSpotClient {
     return results;
   }
 
+  /** Every product in the library (name, SKU, price). */
+  async listProducts() {
+    const products = [];
+    let after;
+    do {
+      const page = await this.request('GET', this.#paths.objects('products'), {
+        query: { limit: 100, properties: 'name,hs_sku,price', after },
+      });
+      products.push(...(page?.results ?? []));
+      after = page?.paging?.next?.after;
+    } while (after);
+    return products;
+  }
+
   readProducts(ids) {
     return this.#batchRead('products', ids, ['name', 'hs_sku', 'price']);
   }
