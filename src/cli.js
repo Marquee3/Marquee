@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { evaluateCalculators } from './calculators.js';
 import { ConfigError, ID_PATTERN } from './config.js';
 import { loadConfig } from './config-loader.js';
+import { ExpressionError, normalizeValues, truthy } from './expression.js';
 import { HubSpotError } from './hubspot.js';
 import { ProductResolver } from './products.js';
 import { DEAL, LINE_ITEM_KEY, PROPERTY_DEFINITIONS, REQUIRED_SCOPES, SETUP_SCOPES } from './properties.js';
@@ -155,6 +156,16 @@ async function check() {
     }
   }
 
+  const afterSync = Object.entries(config.settings.afterSync);
+  if (afterSync.length) {
+    const shown = afterSync.map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');
+    const closes = turnsSyncWhenOff(config.settings);
+    if (closes) console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
+    else if (closes === false) {
+      console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it won't hold back later calculator changes; it's just set whenever line items change.`);
+    }
+  }
+
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
     console.log('\nSet HUBSPOT_ACCESS_TOKEN to also check properties and products in HubSpot.');
     return 0;
@@ -172,9 +183,22 @@ async function check() {
   // them, skip these checks rather than stop.
   const dealProperties = await readProperties(hubspot, 'deals', 'crm.schemas.deals.read');
   if (dealProperties) {
-    const missing = config.dealProperties.filter((name) => !dealProperties.has(name));
+    const used = [...new Set([...config.dealProperties, ...afterSync.map(([name]) => name)])];
+    const missing = used.filter((name) => !dealProperties.has(name));
     if (missing.length) fail(`Deal properties not found in HubSpot: ${missing.join(', ')}`);
     else console.log('✓ All deal properties used by the config exist');
+
+    for (const [name, value] of afterSync) {
+      const p = dealProperties.get(name);
+      if (!p) continue;
+      const options = (p.options ?? []).map((o) => o.value);
+      const values = p.fieldType === 'checkbox' ? value.split(';') : [value];
+      if (p.modificationMetadata?.readOnlyValue || p.calculated === true || String(p.fieldType).startsWith('calculation')) {
+        fail(`settings.afterSync: ${name} is read-only in HubSpot`);
+      } else if (value !== '' && options.length && !values.every((v) => options.includes(v))) {
+        fail(`settings.afterSync: "${value}" isn't one of ${name}'s options (internal values: ${options.join(', ')})`);
+      }
+    }
 
     const calculated = config.inputProperties.filter((name) => {
       const p = dealProperties.get(name);
@@ -210,6 +234,21 @@ async function check() {
 
   console.log(problems ? `\n${problems} problem(s) found.` : '\nAll checks passed.');
   return problems ? 1 : 0;
+}
+
+/**
+ * Whether filling in settings.afterSync's values makes settings.syncWhen
+ * false (judged with only those values filled in), or null if that can't be
+ * told.
+ */
+function turnsSyncWhenOff({ syncWhen, afterSync }) {
+  if (!syncWhen) return false;
+  try {
+    return !truthy(syncWhen.evaluate(normalizeValues(afterSync)));
+  } catch (err) {
+    if (!(err instanceof ExpressionError)) throw err;
+    return null;
+  }
 }
 
 /**
@@ -367,6 +406,10 @@ async function plan(dealId, { force }) {
     keep.forEach((k) => console.log(`  = keep   ${k.key} (#${k.id})`));
     orphans.forEach((o) => console.log(`  ? leave  ${o.key} (#${o.id}): its calculator is no longer in the config`));
     if (!create.length && !update.length && !archive.length) console.log('  (no changes needed)');
+  }
+  if (result.afterSync) {
+    const shown = Object.entries(result.afterSync).map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');
+    console.log(`\nThen sets (settings.afterSync): ${shown}`);
   }
   console.log(`\nOutcome if synced now: ${result.outcome}\n${result.message}`);
   if (!force && result.outcome === 'unchanged') console.log('(Lines are only re-applied when their calculated values change. Add --force to see a full re-apply.)');

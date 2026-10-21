@@ -12,12 +12,14 @@ import {
 import {
   MESSAGES,
   REVIEW_HINT,
+  afterSyncDue,
   changedKeys,
   digestOf,
   formatFingerprint,
   knownEntries,
   lineFingerprints,
   parseFingerprint,
+  pendingAfterSync,
   sameText,
   triage,
   triageProperties,
@@ -30,6 +32,9 @@ import {
  * Outcomes:
  *   synced     line items were created, updated or removed
  *   unchanged  line items already match the calculator output
+ *
+ * Either way, settings.afterSync is saved with the status (result.afterSync
+ * lists what was set).
  *   skipped    the deal is frozen, already has a quote, or fails settings.syncWhen
  *   noop       no calculator applies and the app has never touched the deal
  *   error      nothing (or not everything) could be applied; see message
@@ -78,12 +83,13 @@ export class LineItemSync {
     const properties = deal.properties ?? {};
     const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
     const status = async (outcome, statusValue, message, extra = {}, fingerprint) => {
-      const written = await this.#writeStatus(deal, { status: statusValue, message, fingerprint }, dryRun);
+      const saved = await this.#writeStatus(deal, { status: statusValue, message, fingerprint }, dryRun);
       // If the status couldn't be recorded, try again later: until it is,
       // the deal may not show what was applied (or that it has calculator
       // lines at all).
-      if (!written) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
-      return result(outcome, message, extra);
+      if (!saved.ok) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
+      if (saved.afterSyncError) return result('error', saved.afterSyncError, extra);
+      return result(outcome, message, { ...extra, ...afterSyncResult(saved.afterSync) });
     };
 
     // 1. Decide from the deal's own properties (the poller does the same).
@@ -104,6 +110,12 @@ export class LineItemSync {
     const { evaluation } = t;
     if (evaluation.errors.length) {
       return status('error', STATUS.error, MESSAGES.inputErrors(evaluation.errors), { errors: evaluation.errors });
+    }
+
+    // The go-ahead was given again with nothing to change: just save
+    // settings.afterSync.
+    if (!force && !dryRun && t.reason === 'afterSync') {
+      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired: evaluation.lines });
     }
 
     // Nothing to do if every line is what was last applied (decided before
@@ -173,7 +185,9 @@ export class LineItemSync {
     }
 
     const calculatorNames = this.#calculatorNames(plan);
-    if (dryRun) return result('synced', describePlan(plan, calculatorNames), { desired, plan });
+    if (dryRun) {
+      return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncResult(pendingAfterSync(this.config, properties)) });
+    }
 
     // 6. Apply.
     let duplicatesRemoved = 0;
@@ -207,19 +221,25 @@ export class LineItemSync {
     return ids.length ? this.hubspot.readLineItems(ids, LINE_ITEM_READ_PROPERTIES) : [];
   }
 
-  /** Write the sync status to the deal. Returns false if the write failed. */
+  /**
+   * Write the sync status to the deal, plus settings.afterSync when the
+   * status is synced. Returns { ok: false } if the write failed, and an
+   * afterSyncError if HubSpot refused the afterSync values.
+   */
   async #writeStatus(deal, { status, message, fingerprint }, dryRun) {
-    if (dryRun) return true;
     const text = truncate(message);
 
     // Skip the write when the deal already says this. Every write changes
     // the deal's last-modified time, which would make the poller pick the
     // deal up again and again.
     const current = deal.properties ?? {};
+    const synced = status === STATUS.synced;
     const sameStatus = current[DEAL.status] === status && sameText(current[DEAL.message], text);
     const sameFingerprint = fingerprint === undefined || (current[DEAL.fingerprint] ?? '') === fingerprint;
-    if (sameStatus && sameFingerprint) return true;
+    if (sameStatus && sameFingerprint && !(synced && afterSyncDue(this.config, current))) return { ok: true };
 
+    const afterSync = synced ? pendingAfterSync(this.config, current) : {};
+    if (dryRun) return { ok: true, afterSync };
     const properties = {
       [DEAL.status]: status,
       [DEAL.message]: text,
@@ -227,11 +247,26 @@ export class LineItemSync {
     };
     if (fingerprint !== undefined) properties[DEAL.fingerprint] = fingerprint;
     try {
-      await this.hubspot.updateDeal(deal.id, properties);
-      return true;
+      await this.hubspot.updateDeal(deal.id, { ...properties, ...afterSync });
+      return { ok: true, afterSync };
     } catch (err) {
-      this.logger.error('could not write sync status to deal', { dealId: deal.id, error: describeError(err) });
-      return false;
+      if (!Object.keys(afterSync).length || isTransient(err)) {
+        this.logger.error('could not write sync status to deal', { dealId: deal.id, error: describeError(err) });
+        return { ok: false };
+      }
+      // Probably an afterSync value HubSpot won't accept (e.g. not one of a
+      // dropdown's options). Show that on the deal instead; if this write
+      // fails too, the problem was something else.
+      const afterSyncError = truncate(MESSAGES.afterSyncFailed(describeError(err)));
+      const shown = current[DEAL.status] === STATUS.error && sameText(current[DEAL.message], afterSyncError) && sameFingerprint;
+      if (shown) return { ok: true, afterSyncError };
+      try {
+        await this.hubspot.updateDeal(deal.id, { ...properties, [DEAL.status]: STATUS.error, [DEAL.message]: afterSyncError });
+        return { ok: true, afterSyncError };
+      } catch (again) {
+        this.logger.error('could not write sync status to deal', { dealId: deal.id, error: describeError(again) });
+        return { ok: false };
+      }
     }
   }
 
@@ -268,6 +303,11 @@ function describePlan(plan, calculatorNames, duplicatesRemoved = 0) {
 }
 
 // Worth retrying: rate limits, HubSpot outages and network failures.
+// settings.afterSync values set (or that a dry run would set), if any.
+function afterSyncResult(values) {
+  return values && Object.keys(values).length ? { afterSync: values } : {};
+}
+
 function isTransient(err) {
   if (err instanceof HubSpotError) return err.status === 429 || err.status >= 500;
   const detail = `${err?.message ?? ''} ${err?.cause?.code ?? ''}`;

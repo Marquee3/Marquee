@@ -199,3 +199,26 @@ test('webhooks lists syncWhen properties too, so opening the gate triggers a syn
   assert.match(result.stdout, /^ {2}pricing_status$/m);
   assert.match(result.stdout, /^ {2}seats$/m);
 });
+
+test('check validates settings.afterSync against the property\'s options', async () => {
+  const dir = await emptyConfig();
+  await writeFile(join(dir, 'calculators', 'lic.json'), JSON.stringify({ id: 'lic', appliesWhen: 'seats > 0', lineItems: [{ key: 's', product: { sku: 'SEAT' }, quantity: 'seats' }] }));
+  const status = { name: 'pricing_status', type: 'enumeration', fieldType: 'select', options: [{ value: 'add_line_items' }, { value: 'line_items_added' }] };
+  const dealProperties = [{ name: 'seats', type: 'number' }, status, ...['calc_line_items_status', 'calc_line_items_message', 'calc_line_items_synced_at', 'calc_line_items_fingerprint', 'calc_line_items_frozen'].map((name) => ({ name }))];
+  const products = [{ id: '5', properties: { name: 'Seat', hs_sku: 'SEAT', price: '10' } }];
+  const settings = (afterSync) => writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'pricing_status == "add_line_items"', afterSync }));
+  await withFakeHubSpot({ scopes: ALL_SCOPES, dealProperties, products }, async (base) => {
+    await settings({ pricing_status: 'line_items_added' });
+    const good = await cliWithToken(['check'], dir, base);
+    assert.equal(good.code, 0, good.stdout);
+    assert.match(good.stdout, /After each sync: sets pricing_status = line_items_added, so later changes wait/);
+
+    await settings({ pricing_status: 'Line items added' });
+    const bad = await cliWithToken(['check'], dir, base);
+    assert.equal(bad.code, 1);
+    assert.match(bad.stdout, /"Line items added" isn't one of pricing_status's options \(internal values: add_line_items, line_items_added\)/);
+
+    await settings({ pricing_status: 'add_line_items' });
+    assert.match((await cliWithToken(['check'], dir, base)).stdout, /doesn't turn settings\.syncWhen off/);
+  });
+});

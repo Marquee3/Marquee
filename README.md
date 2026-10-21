@@ -329,19 +329,34 @@ One calculator per file in `config/calculators/`:
 | `skipWhenQuoteExists` | `true` | Leave a deal's line items alone once it has a quote |
 | `setLineOrder` | `true` | Keep calculator lines in config order (`hs_position_on_quote`), applied whenever the deal syncs. Turn off to order lines by hand |
 | `syncWhen` | none | Formula; deals that don't match are ignored entirely, e.g. `"dealstage != \"closedwon\""` |
+| `afterSync` | none | Deal properties to set once the line items are in place, e.g. `{ "pricing_status": "line_items_added" }` (see below) |
 
-**Only add line items when someone says so.** By default line items follow the calculators
-automatically. To wait for a go-ahead instead, gate on a deal property, e.g. a *Pricing status*
-dropdown:
+**Only add line items once the pricing has been checked.** By default line items follow the
+calculators automatically. To wait for a go-ahead instead, such as a *Pricing status* that an
+automation sets once it has validated the calculation:
 
 ```json
-{ "syncWhen": "pricing_status == \"add_line_items\"" }
+{
+  "syncWhen": "pricing_status == \"add_line_items\"",
+  "afterSync": { "pricing_status": "line_items_added" }
+}
 ```
 
-Use the property's and option's internal names (`npm run inspect` lists them). Deals pick up
-within a minute of the status being set. While it's set, calculator changes keep updating the
-lines; once it's changed to anything else (by hand, or by a workflow reacting to
-`calc_line_items_status` = Synced), the lines stay as they are until it's set back.
+- Deals are ignored until the status is *Add line items*, then synced within a minute.
+- `afterSync` moves the status on in the same update that marks the deal synced, including when
+  the lines already matched. Later calculator changes then wait until the status is set to *Add
+  line items* again (re-validated). Without `afterSync`, the lines keep following the
+  calculators for as long as the status stays set.
+- If a sync can't apply the lines (a blank input, a missing SKU, a quote on the deal), the
+  status is left as it is and "Calculator line items: status" says why.
+- Use internal names for the property and the option (`npm run inspect` lists them);
+  `npm run check` confirms the option exists and that `afterSync` switches `syncWhen` off. If
+  HubSpot refuses the value anyway, the deal shows "Needs attention" with HubSpot's reason.
+- Pick an `afterSync` value no automation reacts to by setting the status back to *Add line
+  items*, or the two would keep undoing each other.
+- `afterSync` can't set a calculator input or one of this app's own properties. If it doesn't
+  switch `syncWhen` off (or there's no `syncWhen`), it's simply set whenever line items change,
+  and left alone otherwise.
 
 ### Formulas
 

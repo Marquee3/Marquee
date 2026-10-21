@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseConfig } from '../src/config.js';
+import { HubSpotError } from '../src/hubspot.js';
 import { ProductResolver } from '../src/products.js';
 import { LineItemSync } from '../src/sync.js';
 import { FakeHubSpot } from './fake-hubspot.js';
@@ -238,6 +239,92 @@ test('a syncWhen gate on a dropdown: nothing until it opens, and closing it free
   hubspot.editDeal('7', { pricing_status: 'add_line_items' });
   assert.equal((await sync.syncDeal('7')).outcome, 'synced');
   assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '95');
+});
+
+const GATED = {
+  ...structuredClone(CONFIG),
+  settings: { syncWhen: 'pricing_status == "add_line_items"', afterSync: { pricing_status: 'line_items_added' } },
+};
+const seats = (lines) => lines.find((l) => l.key === 'licences:seats').quantity;
+const dealWrites = (hubspot) => hubspot.calls.filter((c) => c.name === 'updateDeal');
+
+test('afterSync moves the go-ahead on in the same update, so later changes wait for the next one', async () => {
+  const { hubspot, sync, deal, lines } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  const first = await sync.syncDeal('7');
+  assert.equal(first.outcome, 'synced');
+  assert.deepEqual(first.afterSync, { pricing_status: 'line_items_added' });
+  assert.equal(dealWrites(hubspot).length, 1, 'status and afterSync in one update');
+  assert.equal(deal().pricing_status, 'line_items_added');
+  assert.equal(deal().calc_line_items_status, 'synced');
+
+  // Edited after the go-ahead: held back.
+  hubspot.editDeal('7', { users: '95' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.equal(seats(lines()), '80');
+
+  // Go-ahead given again: applied, and moved on again.
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(seats(lines()), '95');
+  assert.equal(deal().pricing_status, 'line_items_added');
+
+  // Go-ahead given with nothing to change: still moved on, line items untouched.
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  hubspot.calls.length = 0;
+  const again = await sync.syncDeal('7');
+  assert.equal(again.outcome, 'unchanged');
+  assert.equal(deal().pricing_status, 'line_items_added');
+  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal', 'updateDeal']);
+});
+
+test('afterSync is not set when line items could not be applied', async () => {
+  const { sync, deal } = setup({ pricing_status: 'add_line_items', unit_rate: '' }, { config: GATED });
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  assert.equal(deal().pricing_status, 'add_line_items');
+});
+
+test('a dry run reports the afterSync values without writing them', async () => {
+  const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  const result = await sync.syncDeal('7', { dryRun: true });
+  assert.deepEqual(result.afterSync, { pricing_status: 'line_items_added' });
+  assert.deepEqual(dealWrites(hubspot), []);
+});
+
+test('an afterSync value HubSpot refuses is shown on the deal, and not rewritten on every retry', async () => {
+  const { hubspot, sync, deal, lines } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  hubspot.failUpdateDeal = async (_, properties) => {
+    if ('pricing_status' in properties) {
+      throw new HubSpotError({ status: 400, method: 'PATCH', path: '/crm/objects/2026-09/deals/7', body: { message: 'line_items_added was not one of the allowed options' } });
+    }
+  };
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'error');
+  assert.match(result.message, /settings\.afterSync could not be saved: .*allowed options/);
+  assert.equal(deal().calc_line_items_status, 'error');
+  assert.match(deal().calc_line_items_message, /afterSync could not be saved/);
+  assert.ok(deal().calc_line_items_fingerprint, 'what was applied is remembered');
+  const applied = lines();
+
+  const writes = dealWrites(hubspot).length;
+  const lineWrites = hubspot.writeCalls().length;
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  assert.equal(dealWrites(hubspot).length, writes + 1, 'only the refused attempt; nothing new to show');
+  assert.equal(hubspot.writeCalls().length, lineWrites, 'line items left alone');
+  assert.deepEqual(lines(), applied);
+});
+
+test('an afterSync that does not end the go-ahead is only set alongside other changes', async () => {
+  const config = { ...structuredClone(CONFIG), settings: { ...CONFIG.settings, afterSync: { line_items_ready: true } } };
+  const { hubspot, sync, deal } = setup({}, { config });
+  await sync.syncDeal('7');
+  assert.equal(deal().line_items_ready, 'true');
+  // Cleared by the team (e.g. a workflow that acted on it): left cleared.
+  hubspot.editDeal('7', { line_items_ready: 'false' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
+  assert.equal(deal().line_items_ready, 'false');
+  hubspot.editDeal('7', { users: '95' });
+  await sync.syncDeal('7');
+  assert.equal(deal().line_items_ready, 'true');
 });
 
 test('deals no calculator applies to are left untouched', async () => {

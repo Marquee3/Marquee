@@ -1,4 +1,5 @@
 import { compile, compileTemplate, ExpressionError } from './expression.js';
+import { DEAL } from './properties.js';
 
 export class ConfigError extends Error {
   constructor(problems) {
@@ -9,9 +10,10 @@ export class ConfigError extends Error {
 }
 
 export const ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/i;
+const PROPERTY_NAME = /^[a-z][a-z0-9_]*$/i;
 
 const TOP_LEVEL_FIELDS = ['settings', 'calculators'];
-const SETTINGS_FIELDS = ['skipWhenQuoteExists', 'setLineOrder', 'syncWhen'];
+const SETTINGS_FIELDS = ['skipWhenQuoteExists', 'setLineOrder', 'syncWhen', 'afterSync'];
 const CALCULATOR_FIELDS = ['id', 'name', 'appliesWhen', 'lineItems', 'notes'];
 const LINE_FIELDS = ['key', 'product', 'quantity', 'unitPrice', 'totalPrice', 'includeWhen', 'name', 'description', 'notes'];
 
@@ -73,6 +75,7 @@ export function parseConfig(raw) {
     skipWhenQuoteExists: rawSettings.skipWhenQuoteExists ?? true,
     setLineOrder: rawSettings.setLineOrder ?? true,
     syncWhen: compileField(rawSettings.syncWhen, 'settings.syncWhen', conditionProperties),
+    afterSync: parseAfterSync(rawSettings.afterSync, problems),
   };
   for (const name of ['skipWhenQuoteExists', 'setLineOrder']) {
     if (typeof settings[name] !== 'boolean') problems.push(`settings.${name}: expected true or false`);
@@ -150,6 +153,10 @@ export function parseConfig(raw) {
     });
   }
 
+  for (const name of Object.keys(settings.afterSync)) {
+    if (inputProperties.has(name)) problems.push(`settings.afterSync.${name}: a calculator reads this property, so setting it would change the line items`);
+  }
+
   if (problems.length) throw new ConfigError(problems);
 
   const lines = calculators.flatMap((c) => c.lineItems);
@@ -161,6 +168,28 @@ export function parseConfig(raw) {
     skus: [...new Set(lines.filter((l) => l.product.sku).map((l) => l.product.sku))],
     productIds: [...new Set(lines.filter((l) => l.product.id).map((l) => l.product.id))],
   };
+}
+
+// Deal properties to set once a deal's line items are in place, e.g. to move
+// a status on so later calculator changes wait for the next go-ahead.
+// Values are kept as text, the way HubSpot returns them.
+function parseAfterSync(value, problems) {
+  if (value === undefined) return {};
+  if (!isObject(value)) {
+    problems.push('settings.afterSync: expected deal property names and values, e.g. { "pricing_status": "line_items_added" }');
+    return {};
+  }
+  const result = {};
+  for (const [name, raw] of Object.entries(value)) {
+    if (name.startsWith('$')) continue;
+    const where = `settings.afterSync.${name}`;
+    if (!PROPERTY_NAME.test(name)) problems.push(`${where}: expected a deal property's internal name`);
+    else if (Object.values(DEAL).includes(name)) problems.push(`${where}: this is one of the app's own properties`);
+    else if (typeof raw === 'string') result[name] = raw;
+    else if (typeof raw === 'boolean' || (typeof raw === 'number' && Number.isFinite(raw))) result[name] = String(raw);
+    else problems.push(`${where}: expected text, a number, or true/false`);
+  }
+  return result;
 }
 
 function parseProduct(value, where, problems) {

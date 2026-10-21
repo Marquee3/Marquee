@@ -115,6 +115,40 @@ test('cron run picks a deal up when a syncWhen gate opens, not before', async ()
   assert.deepEqual(sent.map((m) => m.body.dealId), ['1']);
 });
 
+test('with afterSync, a go-ahead is applied once and the deal then goes quiet', async () => {
+  let clock = T0;
+  const hubspot = new FakeHubSpot({ products: [{ id: '1', hs_sku: 'SEAT', name: 'Seat', price: '10' }], now: () => clock });
+  const sent = [];
+  const env = { HUBSPOT_ACCESS_TOKEN: 'pat-test', SYNC_QUEUE: { sendBatch: async (messages) => sent.push(...messages) } };
+  const settings = { syncWhen: 'pricing_status == "add_line_items"', afterSync: { pricing_status: 'line_items_added' } };
+  const worker = createWorker({ ...RAW_CONFIG, settings }, { createClient: () => hubspot });
+  hubspot.deals.set('1', { id: '1', properties: { seats: '3', pricing_status: 'add_line_items', hs_lastmodifieddate: new Date(clock - 120_000).toISOString() } });
+  const cronQueues = async () => {
+    clock += 60_000;
+    sent.length = 0;
+    await worker.scheduled({ scheduledTime: clock }, env);
+    return sent.map((m) => m.body.dealId);
+  };
+  const consume = async () => {
+    const m = message({ dealId: '1' });
+    await worker.queue({ messages: [m] }, env);
+    assert.equal(m.acked, true);
+  };
+
+  assert.deepEqual(await cronQueues(), ['1']);
+  await consume();
+  assert.equal(hubspot.deals.get('1').properties.pricing_status, 'line_items_added');
+  assert.deepEqual(await cronQueues(), [], 'its own write does not bring the deal back');
+
+  // Go-ahead given again with nothing changed: moved on again, then quiet.
+  hubspot.editDeal('1', { pricing_status: 'add_line_items' });
+  assert.deepEqual(await cronQueues(), ['1']);
+  await consume();
+  assert.equal(hubspot.deals.get('1').properties.pricing_status, 'line_items_added');
+  assert.deepEqual(await cronQueues(), []);
+  assert.equal(hubspot.dealLineItems('1').length, 1);
+});
+
 test('catch-up runs look further back; deals needing attention are re-checked on their own minutes', async () => {
   const { worker, env, sent, hubspot } = setup();
   const top = Date.parse('2026-10-18T10:00:00Z');

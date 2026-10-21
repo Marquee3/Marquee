@@ -24,6 +24,7 @@ export const MESSAGES = {
     `Line items were not changed because the calculator output couldn't be turned into line items:\n• ${errors.join('\n• ')}`,
   syncWhenError: (message) => `Line items were not changed: settings.syncWhen: ${message}`,
   alreadyMatch: `Line items already match the calculator. ${REVIEW_HINT}`,
+  afterSyncFailed: (error) => `Line items are up to date, but settings.afterSync could not be saved: ${error}`,
   noCalculator: 'No calculator applies to this deal, so it has no calculator line items.',
   orphansLeft: (count) =>
     `No calculator in the current config applies to this deal. ${count} line item${count === 1 ? '' : 's'} from calculators no longer in the config ${count === 1 ? 'was' : 'were'} left as ${count === 1 ? 'it is' : 'they are'}.`,
@@ -110,7 +111,9 @@ function hash(text) {
  *
  * action "skip" means a sync would change nothing and write nothing:
  *   reason "syncWhen" | "syncWhenError" | "noop" | "frozen" | "errors" | "unchanged" | "quote"
- * action "sync" means a sync is needed (or needs the API to decide).
+ * action "sync" means a sync is needed (or needs the API to decide), with the
+ * same reasons, or "changed", or "afterSync" (the lines match, but
+ * settings.afterSync still needs saving).
  */
 export function triage(config, properties) {
   const values = normalizeValues(properties);
@@ -152,13 +155,48 @@ export function triage(config, properties) {
   // Entries for calculators no longer in the config are kept but ignored.
   const stored = storedAll && knownEntries(storedAll, new Set(config.calculators.map((calc) => calc.id)));
   if (stored && sameMap(stored, fingerprints) && status === STATUS.synced) {
-    return skip('unchanged', { evaluation, fingerprints, stored, storedAll });
+    const extra = { evaluation, fingerprints, stored, storedAll };
+    // The go-ahead was given again with nothing to change.
+    return afterSyncDue(config, properties) ? sync('afterSync', extra) : skip('unchanged', extra);
   }
   // Held back because of a quote, and the output hasn't changed since.
   if (status === STATUS.skipped && sameText(message, MESSAGES.quote) && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
     return skip('quote', { evaluation, fingerprints, stored, storedAll });
   }
   return sync('changed', { evaluation, fingerprints, stored, storedAll });
+}
+
+/** The settings.afterSync values the deal doesn't have yet ({} if none). */
+export function pendingAfterSync(config, properties) {
+  const pending = {};
+  for (const [name, value] of Object.entries(config.settings.afterSync ?? {})) {
+    if (!sameValue(properties[name], value)) pending[name] = value;
+  }
+  return pending;
+}
+
+/**
+ * Whether settings.afterSync turns settings.syncWhen off (it withdraws the
+ * go-ahead) and hasn't been saved yet. It is then saved even when the line
+ * items haven't changed, so later calculator changes wait for the next
+ * go-ahead. An afterSync that doesn't turn syncWhen off is only saved
+ * alongside other changes, so it never fights edits the team makes to it.
+ */
+export function afterSyncDue(config, properties) {
+  const { syncWhen, afterSync } = config.settings;
+  if (!syncWhen || !Object.keys(pendingAfterSync(config, properties)).length) return false;
+  try {
+    return truthy(syncWhen.evaluate(normalizeValues(properties))) && !truthy(syncWhen.evaluate(normalizeValues({ ...properties, ...afterSync })));
+  } catch (err) {
+    if (!(err instanceof ExpressionError)) throw err;
+    return false;
+  }
+}
+
+function sameValue(current, wanted) {
+  const a = String(current ?? '').trim();
+  const b = String(wanted).trim();
+  return a === b || (a !== '' && b !== '' && Number.isFinite(Number(a)) && Number(a) === Number(b));
 }
 
 export function sameMap(a, b) {
@@ -175,5 +213,5 @@ export function sameText(stored, text) {
 
 /** Every deal property the triage (and so the poller's search) needs. */
 export function triageProperties(config) {
-  return [...new Set([...config.dealProperties, ...Object.values(DEAL), 'hs_lastmodifieddate'])];
+  return [...new Set([...config.dealProperties, ...Object.keys(config.settings.afterSync ?? {}), ...Object.values(DEAL), 'hs_lastmodifieddate'])];
 }
