@@ -21,6 +21,24 @@ export const STATUS = {
   error: 'error',
 };
 
+// HubSpot permissions (scopes) the app's token needs. Each entry lists
+// equivalent scope names; having any one of them is enough.
+export const REQUIRED_SCOPES = [
+  { purpose: 'read deals', any: ['crm.objects.deals.read'] },
+  { purpose: 'write the sync status on deals', any: ['crm.objects.deals.write'] },
+  { purpose: 'read line items', any: ['crm.objects.line_items.read'] },
+  { purpose: 'create, update and remove line items', any: ['crm.objects.line_items.write'] },
+  { purpose: 'check whether a deal has a quote', any: ['crm.objects.quotes.read'] },
+  { purpose: 'look up products by SKU', any: ['e-commerce', 'crm.objects.products.read'] },
+];
+
+// Only needed by `npm run check` and `npm run setup`.
+export const SETUP_SCOPES = [
+  { purpose: 'read deal properties', any: ['crm.schemas.deals.read'] },
+  { purpose: 'create the app\'s deal properties', any: ['crm.schemas.deals.write'] },
+  { purpose: 'read line item properties', any: ['crm.schemas.line_items.read'] },
+];
+
 export const PROPERTY_DEFINITIONS = {
   deals: [
     {

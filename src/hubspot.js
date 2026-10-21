@@ -119,6 +119,13 @@ export class HubSpotClient {
     }
   }
 
+  // --- Token -------------------------------------------------------------------
+
+  /** The HubSpot account and permissions (scopes) of this access token. */
+  getTokenInfo() {
+    return this.request('POST', '/oauth/v2/private-apps/get/access-token-info', { body: { tokenKey: this.#token } });
+  }
+
   // --- Deals -------------------------------------------------------------------
 
   getDeal(dealId, properties) {

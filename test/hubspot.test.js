@@ -128,3 +128,11 @@ test('searches deals with the given filters', async () => {
   assert.equal(requests[0].url.pathname, '/crm/objects/2026-09/deals/search');
   assert.deepEqual(requests[0].body, { filterGroups, sorts, properties: ['seats'], limit: 200, after: '0' });
 });
+
+test('reads the token\'s own account and permissions', async () => {
+  const { fetch, requests } = fakeFetch(() => ({ body: { hubId: 1, scopes: ['crm.objects.deals.read'] } }));
+  const info = await clientWith(fetch).getTokenInfo();
+  assert.deepEqual(info.scopes, ['crm.objects.deals.read']);
+  assert.equal(requests[0].url.pathname, '/oauth/v2/private-apps/get/access-token-info');
+  assert.deepEqual(requests[0].body, { tokenKey: 'pat-123' });
+});

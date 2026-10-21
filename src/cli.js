@@ -7,7 +7,7 @@ import { ConfigError, ID_PATTERN } from './config.js';
 import { loadConfig } from './config-loader.js';
 import { HubSpotError } from './hubspot.js';
 import { ProductResolver } from './products.js';
-import { DEAL, LINE_ITEM_KEY, PROPERTY_DEFINITIONS } from './properties.js';
+import { DEAL, LINE_ITEM_KEY, PROPERTY_DEFINITIONS, REQUIRED_SCOPES, SETUP_SCOPES } from './properties.js';
 import { configDir, createClient, loadEnv } from './runtime.js';
 import { findDealsWithInputs } from './sweep.js';
 import { LineItemSync } from './sync.js';
@@ -129,7 +129,10 @@ async function check() {
   if (!config.calculators.length) {
     console.log(`No calculators yet in ${join(dir, 'calculators')}.`);
     console.log('Start one with "npm run new-calculator -- <id> <name>", or copy a file from examples/calculators/.');
-    return 0;
+    if (!process.env.HUBSPOT_ACCESS_TOKEN) return 0;
+    console.log('');
+    const problems = await checkToken(client());
+    return problems ? 1 : 0;
   }
   const lineCount = config.calculators.reduce((n, c) => n + c.lineItems.length, 0);
   console.log(`✓ Config is valid: ${config.calculators.length} calculator(s), ${lineCount} line item rule(s)`);
@@ -154,7 +157,8 @@ async function check() {
   }
 
   const hubspot = client();
-  let problems = 0;
+  console.log('');
+  let problems = await checkToken(hubspot);
   const fail = (message) => {
     problems++;
     console.log(`✗ ${message}`);
@@ -202,6 +206,37 @@ async function check() {
 
   console.log(problems ? `\n${problems} problem(s) found.` : '\nAll checks passed.');
   return problems ? 1 : 0;
+}
+
+/**
+ * Which HubSpot account the token belongs to, and whether it has the
+ * permissions the service needs. Never prints the token. Returns the number
+ * of problems found.
+ */
+async function checkToken(hubspot) {
+  let info;
+  try {
+    info = await hubspot.getTokenInfo();
+  } catch (err) {
+    if (err instanceof HubSpotError && err.status === 401) {
+      console.log('✗ HubSpot rejected the access token (401). Check HUBSPOT_ACCESS_TOKEN.');
+      return 1;
+    }
+    console.log(`! Couldn't read this token's permissions (${err.message}). The checks below show anything it can't do.`);
+    return 0;
+  }
+  const scopes = new Set(info?.scopes ?? []);
+  console.log(`✓ Token works: HubSpot account ${info?.hubId ?? '?'}${info?.appId ? `, app ${info.appId}` : ''}`);
+  const lacking = (list) => list.filter((need) => !need.any.some((scope) => scopes.has(scope)));
+  const missing = lacking(REQUIRED_SCOPES);
+  const missingSetup = lacking(SETUP_SCOPES);
+  const describe = (list) => list.map((need) => `${need.any[0]} (${need.purpose})`).join(', ');
+  if (missing.length) console.log(`✗ Token is missing permissions the service needs: ${describe(missing)}`);
+  else console.log('✓ Token has every permission the service needs');
+  if (missingSetup.length) {
+    console.log(`! Token is missing permissions for "npm run setup" and these checks: ${describe(missingSetup)}. Add them, or create the properties by hand (see README).`);
+  }
+  return missing.length ? 1 : 0;
 }
 
 async function setup() {

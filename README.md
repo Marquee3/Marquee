@@ -141,7 +141,17 @@ needed.
 
 ## Setting it up
 
-### 1. Create the HubSpot app
+### 1. Get an access token
+
+**Already have a `pat-` access token** (for example from whoever manages the HubSpot account)?
+Use it and skip creating an app. Put it in `.env` as `HUBSPOT_ACCESS_TOKEN` and run
+`npm run check`. The first lines show which HubSpot account the token belongs to, and whether it
+has every permission listed below. If the token comes from a *legacy* private app, it works until
+HubSpot ends support for those in September 2027. Swapping in a token from a project-based app
+(below) then is a settings change, with no code changes. A token used only by this service is
+best: it can be rotated or revoked without affecting anything else.
+
+**Otherwise, create the HubSpot app:**
 
 The app gives the service an access token, plus a client secret if you add webhooks.
 `hubspot-project/` holds the app definition: platform `2026.09`, private distribution, static
@@ -161,8 +171,6 @@ Then, in HubSpot, open the app (Development → Projects), install it in your ac
 `hs project upload` rejects a field (HubSpot's config format moves quickly), fix it as the CLI
 says; nothing in the service depends on these files.
 
-*Already have a legacy private app with these scopes?* Its token works too, until legacy apps go
-unsupported in September 2027.
 
 ### 2. Try it locally
 
@@ -174,7 +182,7 @@ cp .env.example .env              # add HUBSPOT_ACCESS_TOKEN, for the commands b
 npm test                          # unit tests, no HubSpot needed
 npm run setup                     # create the app's deal + line item properties (safe to re-run)
 npm run new-calculator -- …       # add your first calculator (see above)
-npm run check                     # config valid? properties and SKUs exist in HubSpot?
+npm run check                     # token's account and permissions; config valid; properties and SKUs exist?
 npm run plan -- 123456789         # dry run on a real deal: shows the lines and changes, writes nothing
 npm run sync -- 123456789         # actually sync that deal
 ```

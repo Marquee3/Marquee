@@ -75,3 +75,70 @@ test('check warns about a calculator that applies to every deal', async () => {
   const result = await cli(['check'], dir);
   assert.match(result.stdout, /fee adds line items to every deal/);
 });
+
+// A tiny HubSpot stand-in for the token and property checks.
+async function withFakeHubSpot({ scopes, status = 200 }, fn) {
+  const { createServer } = await import('node:http');
+  const server = createServer(async (req, res) => {
+    for await (const _ of req);
+    const send = (code, body) => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.url === '/oauth/v2/private-apps/get/access-token-info') {
+      return status === 200 ? send(200, { hubId: 4242, appId: 77, userId: 1, scopes }) : send(status, { message: 'Authentication credentials not found' });
+    }
+    send(404, { message: 'not in this fake' });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await fn(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    server.close();
+  }
+}
+
+async function cliWithToken(args, configDir, baseUrl) {
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [CLI, ...args], {
+      cwd: configDir,
+      env: { PATH: process.env.PATH, CONFIG_DIR: configDir, HUBSPOT_ACCESS_TOKEN: 'pat-eu1-secret-token-value', HUBSPOT_API_BASE_URL: baseUrl },
+    });
+    return { code: 0, stdout };
+  } catch (err) {
+    return { code: err.code, stdout: err.stdout + err.stderr };
+  }
+}
+
+const ALL_SCOPES = [
+  'crm.objects.deals.read', 'crm.objects.deals.write', 'crm.objects.line_items.read', 'crm.objects.line_items.write',
+  'crm.objects.quotes.read', 'e-commerce', 'crm.schemas.deals.read', 'crm.schemas.deals.write', 'crm.schemas.line_items.read',
+];
+
+test('check reports the token\'s account and that it has every permission, before any calculator exists', async () => {
+  await withFakeHubSpot({ scopes: ALL_SCOPES }, async (base) => {
+    const result = await cliWithToken(['check'], await emptyConfig(), base);
+    assert.equal(result.code, 0, result.stdout);
+    assert.match(result.stdout, /Token works: HubSpot account 4242, app 77/);
+    assert.match(result.stdout, /Token has every permission the service needs/);
+    assert.doesNotMatch(result.stdout, /secret-token-value/, 'never prints the token');
+  });
+});
+
+test('check names the permissions a token is missing', async () => {
+  const scopes = ALL_SCOPES.filter((s) => s !== 'crm.objects.line_items.write' && s !== 'crm.schemas.deals.write');
+  await withFakeHubSpot({ scopes }, async (base) => {
+    const result = await cliWithToken(['check'], await emptyConfig(), base);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /missing permissions the service needs: crm\.objects\.line_items\.write \(create, update and remove line items\)/);
+    assert.match(result.stdout, /missing permissions for "npm run setup".*crm\.schemas\.deals\.write/);
+  });
+});
+
+test('check says clearly when HubSpot rejects the token', async () => {
+  await withFakeHubSpot({ status: 401 }, async (base) => {
+    const result = await cliWithToken(['check'], await emptyConfig(), base);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /HubSpot rejected the access token \(401\)/);
+  });
+});
