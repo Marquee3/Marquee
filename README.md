@@ -330,6 +330,19 @@ One calculator per file in `config/calculators/`:
 | `setLineOrder` | `true` | Keep calculator lines in config order (`hs_position_on_quote`), applied whenever the deal syncs. Turn off to order lines by hand |
 | `syncWhen` | none | Formula; deals that don't match are ignored entirely, e.g. `"dealstage != \"closedwon\""` |
 
+**Only add line items when someone says so.** By default line items follow the calculators
+automatically. To wait for a go-ahead instead, gate on a deal property, e.g. a *Pricing status*
+dropdown:
+
+```json
+{ "syncWhen": "pricing_status == \"add_line_items\"" }
+```
+
+Use the property's and option's internal names (`npm run inspect` lists them). Deals pick up
+within a minute of the status being set. While it's set, calculator changes keep updating the
+lines; once it's changed to anything else (by hand, or by a workflow reacting to
+`calc_line_items_status` = Synced), the lines stay as they are until it's set back.
+
 ### Formulas
 
 Formulas refer to deal properties by **internal name**.
@@ -392,7 +405,7 @@ stop the minute-by-minute check. Settings are environment variables (see `.env.e
 | Variable | Default | |
 | --- | --- | --- |
 | `HUBSPOT_ACCESS_TOKEN` | required | App access token |
-| `SYNC_POLL_SECONDS` | 60 | How often to check for changed deals. `0` turns checking off, leaving webhooks as the only trigger, so every calculator input must then be subscribed |
+| `SYNC_POLL_SECONDS` | 60 | How often to check for changed deals. `0` turns checking off, leaving webhooks as the only trigger, so every property `npm run webhooks` lists must then be subscribed |
 | `SYNC_POLL_LOOKBACK_MINUTES` | 60 | On startup, how far back to look |
 | `HUBSPOT_CLIENT_SECRET`, `PUBLIC_URL` | for webhooks | Signature checking; `PUBLIC_URL` is the URL HubSpot calls |
 | `SYNC_API_KEY` | optional | Enables `POST /sync` |

@@ -98,6 +98,23 @@ test('cron run queues changed deals that need a sync, and skips the rest', async
   assert.deepEqual(sent, []);
 });
 
+test('cron run picks a deal up when a syncWhen gate opens, not before', async () => {
+  let clock = T0;
+  const hubspot = new FakeHubSpot({ products: [{ id: '1', hs_sku: 'SEAT', name: 'Seat', price: '10' }], now: () => clock });
+  const sent = [];
+  const env = { HUBSPOT_ACCESS_TOKEN: 'pat-test', SYNC_QUEUE: { sendBatch: async (messages) => sent.push(...messages) } };
+  const worker = createWorker({ ...RAW_CONFIG, settings: { syncWhen: 'pricing_status == "add_line_items"' } }, { createClient: () => hubspot });
+  hubspot.deals.set('1', { id: '1', properties: { seats: '3', pricing_status: 'in_progress', hs_lastmodifieddate: new Date(clock - 120_000).toISOString() } });
+
+  await worker.scheduled({ scheduledTime: clock }, env);
+  assert.deepEqual(sent, []);
+
+  hubspot.editDeal('1', { pricing_status: 'add_line_items' });
+  clock += 60_000;
+  await worker.scheduled({ scheduledTime: clock }, env);
+  assert.deepEqual(sent.map((m) => m.body.dealId), ['1']);
+});
+
 test('catch-up runs look further back; deals needing attention are re-checked on their own minutes', async () => {
   const { worker, env, sent, hubspot } = setup();
   const top = Date.parse('2026-10-18T10:00:00Z');

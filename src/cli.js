@@ -431,12 +431,13 @@ async function backfill({ calculatorId, all, force, dryRun }) {
 
 async function webhooks(targetUrl) {
   const config = await loadConfig(configDir());
-  // The freeze checkbox is included so unticking it triggers a re-sync.
-  const properties = [...new Set([...config.inputProperties, DEAL.frozen])].sort();
+  // Calculator inputs, plus the properties syncWhen reads (so opening that gate
+  // triggers a sync) and the freeze checkbox (so unticking it does).
+  const properties = [...new Set([...config.dealProperties, DEAL.frozen])].sort();
   console.log('Webhooks are optional while polling is on (the default): changed deals are found every minute.');
   console.log('For instant updates, subscribe to "Deal: property changed" for each of these properties,');
   console.log('and re-run this after adding a calculator. With polling off (SYNC_POLL_SECONDS=0), webhooks');
-  console.log('are the only trigger, so every calculator input must be subscribed:');
+  console.log('are the only trigger, so every one of them must be subscribed:');
   properties.forEach((name) => console.log(`  ${name}`));
 
   if (!targetUrl) {

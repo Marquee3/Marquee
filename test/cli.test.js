@@ -189,3 +189,13 @@ test('inspect explains a missing permission', async () => {
     assert.match(result.stdout, /lacks crm\.schemas\.deals\.read/);
   });
 });
+
+test('webhooks lists syncWhen properties too, so opening the gate triggers a sync', async () => {
+  const dir = await emptyConfig();
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'pricing_status == "add_line_items"' }));
+  await writeFile(join(dir, 'calculators', 'lic.json'), JSON.stringify({ id: 'lic', appliesWhen: 'seats > 0', lineItems: [{ key: 's', product: { id: '1' }, quantity: 'seats' }] }));
+  const result = await cli(['webhooks'], dir);
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /^ {2}pricing_status$/m);
+  assert.match(result.stdout, /^ {2}seats$/m);
+});

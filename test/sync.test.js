@@ -219,6 +219,27 @@ test('deals outside syncWhen are skipped without writing anything', async () => 
   assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal']);
 });
 
+test('a syncWhen gate on a dropdown: nothing until it opens, and closing it freezes the lines', async () => {
+  const config = { ...structuredClone(CONFIG), settings: { syncWhen: 'pricing_status == "add_line_items"' } };
+  const { hubspot, sync, lines } = setup({ pricing_status: 'in_progress' }, { config });
+  await sync.syncDeal('7');
+  assert.deepEqual(lines(), []);
+  assert.deepEqual(hubspot.calls.filter((c) => c.name === 'updateDeal'), [], 'not even a status');
+
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '80');
+
+  // Moved on (e.g. by a workflow): calculator changes no longer reach the lines.
+  hubspot.editDeal('7', { pricing_status: 'line_items_added', users: '95' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '80');
+
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '95');
+});
+
 test('deals no calculator applies to are left untouched', async () => {
   const { hubspot, sync } = setup({ rooms: '', users: '' });
   const result = await sync.syncDeal('7');
