@@ -361,17 +361,43 @@ test('plan takes the same shortcut as a real sync when the go-ahead is given aga
   assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
 });
 
-test('a gate that is open by default is not used up before any calculator applies', async () => {
+test('afterSync only uses up a go-ahead someone gave, not a gate that is open by default', async () => {
   const config = { ...structuredClone(CONFIG), settings: { syncWhen: 'line_items_added != true', afterSync: { line_items_added: true } } };
   const { hubspot, sync, deal, lines } = setup({ rooms: '', users: '' }, { config });
   assert.equal((await sync.syncDeal('7')).outcome, 'noop');
-  assert.equal(deal().line_items_added, undefined);
   hubspot.editDeal('7', { users: '80' });
   assert.equal((await sync.syncDeal('7')).outcome, 'synced');
-  assert.equal(deal().line_items_added, 'true');
+  assert.equal(deal().line_items_added, undefined);
   hubspot.editDeal('7', { users: '95' });
+  await sync.syncDeal('7');
+  assert.equal(seats(lines()), '95');
+});
+
+test('plan does not report afterSync for a deal held back by a quote', async () => {
+  const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  await sync.syncDeal('7');
+  hubspot.quotes.set('7', ['q1']);
+  hubspot.editDeal('7', { users: '95', pricing_status: 'add_line_items' });
   assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
-  assert.equal(seats(lines()), '80');
+  // The team updates the line by hand, as the message suggests.
+  hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'licences:seats').properties.quantity = '95';
+  const plan = await sync.syncDeal('7', { dryRun: true });
+  assert.equal(plan.afterSync, undefined, 'a real run stops at the quote and sets nothing');
+});
+
+test('if the error status cannot be saved after a failed apply, the sync asks to be retried', async () => {
+  const { hubspot, sync } = setup();
+  await sync.syncDeal('7');
+  hubspot.editDeal('7', { users: '95' });
+  hubspot.updateLineItems = async () => {
+    throw new HubSpotError({ status: 400, method: 'POST', path: '/crm/objects/2026-09/line_items/batch/update', body: { message: 'rejected' } });
+  };
+  hubspot.failUpdateDeal = async () => {
+    throw new HubSpotError({ status: 503, method: 'PATCH', path: '/crm/objects/2026-09/deals/7', body: { message: 'unavailable' } });
+  };
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'error');
+  assert.equal(result.retry, true);
 });
 
 test('after a partly failed update, a line that is no longer wanted is still removed', async () => {

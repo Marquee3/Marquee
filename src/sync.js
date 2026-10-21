@@ -73,8 +73,10 @@ export class LineItemSync {
       // state: forget just their fingerprints so the next sync re-checks
       // them. Otherwise the stored fingerprint still describes what's on the
       // deal, and is kept.
-      await this.#writeStatus(deal, { status: STATUS.error, message, fingerprint: err?.fingerprintAfterFailure }, dryRun);
-      return this.#log({ dealId, outcome: 'error', message, dryRun, retry: isTransient(err) });
+      const saved = await this.#writeStatus(deal, { status: STATUS.error, message, fingerprint: err?.fingerprintAfterFailure }, dryRun);
+      // Until the error is saved, the deal may show "synced" over lines that
+      // were partly changed, so try again later.
+      return this.#log({ dealId, outcome: 'error', message, dryRun, retry: isTransient(err) || !saved.ok });
     }
   }
 
@@ -82,6 +84,10 @@ export class LineItemSync {
     const dealId = String(deal.id);
     const properties = deal.properties ?? {};
     const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
+    // A real run stops at a quote hold (below); a dry run goes on to show the
+    // plan, but mustn't report afterSync values a real run wouldn't set.
+    const t = triage(this.config, properties);
+    const noAfterSync = dryRun && !force && t.reason === 'quote';
     // dealText is what the deal shows, when it differs from the result message.
     const status = async (outcome, statusValue, message, extra = {}, fingerprint, dealText = message) => {
       const saved = await this.#writeStatus(deal, { status: statusValue, message: dealText, fingerprint }, dryRun);
@@ -90,11 +96,10 @@ export class LineItemSync {
       // lines at all).
       if (!saved.ok) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
       if (saved.afterSyncError) return result('error', saved.afterSyncError, extra);
-      return result(outcome, message, { ...extra, ...afterSyncResult(saved.afterSync) });
+      return result(outcome, message, { ...extra, ...(noAfterSync ? {} : afterSyncResult(saved.afterSync)) });
     };
 
     // 1. Decide from the deal's own properties (the poller does the same).
-    const t = triage(this.config, properties);
     if (t.reason === 'syncWhen') {
       // Not written to the deal: syncWhen typically excludes most deals
       // (e.g. closed ones) and a status on each would just be noise.
@@ -188,7 +193,7 @@ export class LineItemSync {
 
     const calculatorNames = this.#calculatorNames(plan);
     if (dryRun) {
-      const afterSync = afterSyncDue(this.config, properties) ? pendingAfterSync(this.config, properties) : {};
+      const afterSync = !noAfterSync && afterSyncDue(this.config, properties) ? pendingAfterSync(this.config, properties) : {};
       return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncResult(afterSync) });
     }
 

@@ -225,6 +225,10 @@ test('check validates settings.afterSync against the property\'s options', async
     await settings({ seats_checked: true });
     assert.match((await cli(['check'], dir)).stdout, /doesn't turn settings\.syncWhen off/);
 
+    // A gate that is open while the property is blank is never "given".
+    await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'line_items_added != true', afterSync: { line_items_added: true } }));
+    assert.match((await cli(['check'], dir)).stdout, /will never be set/);
+
     // A gate that also reads other properties: check can't be sure either way.
     await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'pricing_status == "add_line_items" && seats_confirmed', afterSync: { pricing_status: 'add_line_items' } }));
     const compound = (await cli(['check'], dir)).stdout;

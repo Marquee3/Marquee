@@ -138,7 +138,7 @@ export function triage(config, properties) {
   const evaluation = evaluateCalculators(config, properties);
   const untouched = !properties[DEAL.fingerprint] && !status;
   // Unless someone gave the go-ahead: that is used up even with no lines to add.
-  if (!evaluation.lines.length && !evaluation.errors.length && untouched && !goAheadGiven(config, properties)) {
+  if (!evaluation.lines.length && !evaluation.errors.length && untouched && !afterSyncDue(config, properties)) {
     return skip('noop', { evaluation });
   }
 
@@ -180,34 +180,24 @@ export function pendingAfterSync(config, properties) {
 }
 
 /**
- * Whether settings.afterSync is due: the go-ahead (settings.syncWhen) is
- * open, and saving afterSync would close it. It is then saved with the next
- * synced status, even when the line items haven't changed, so later
- * calculator changes wait for the next go-ahead. An afterSync that doesn't
- * close syncWhen is never saved.
+ * Whether settings.afterSync is due: someone gave the go-ahead
+ * (settings.syncWhen matches, but wouldn't with the afterSync properties
+ * blank), and saving afterSync would withdraw it. It is then saved with the
+ * next synced status, even when the line items haven't changed, so later
+ * calculator changes wait for the next go-ahead. It is never saved otherwise,
+ * so a gate that is open by default (e.g. "line_items_added != true") is
+ * never closed by it.
  */
 export function afterSyncDue(config, properties) {
   const { syncWhen, afterSync } = config.settings;
   if (!syncWhen || !Object.keys(pendingAfterSync(config, properties)).length) return false;
+  const blank = Object.fromEntries(Object.keys(afterSync).map((name) => [name, null]));
+  const matches = (values) => truthy(syncWhen.evaluate(normalizeValues(values)));
   try {
-    return truthy(syncWhen.evaluate(normalizeValues(properties))) && !truthy(syncWhen.evaluate(normalizeValues({ ...properties, ...afterSync })));
+    return matches(properties) && !matches({ ...properties, ...afterSync }) && !matches({ ...properties, ...blank });
   } catch (err) {
     if (!(err instanceof ExpressionError)) throw err;
     return false;
-  }
-}
-
-// Due, and not just because the afterSync properties are blank, as on a new
-// deal with a gate like "line_items_added != true".
-function goAheadGiven(config, properties) {
-  if (!afterSyncDue(config, properties)) return false;
-  const { syncWhen, afterSync } = config.settings;
-  const blank = Object.fromEntries(Object.keys(afterSync).map((name) => [name, null]));
-  try {
-    return !truthy(syncWhen.evaluate(normalizeValues({ ...properties, ...blank })));
-  } catch (err) {
-    if (!(err instanceof ExpressionError)) throw err;
-    return true;
   }
 }
 

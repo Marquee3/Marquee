@@ -358,10 +358,9 @@ automation sets once it has validated the calculation:
 - Pick an `afterSync` value no automation reacts to by setting the status back to *Add line
   items*, or the two would keep undoing each other.
 - `afterSync` needs `syncWhen`, can't set a calculator input or one of this app's own
-  properties, and is only ever set where it switches `syncWhen` off.
-- A gate that is open until `afterSync` closes it (e.g. `"line_items_added != true"` with
-  `{ "line_items_added": true }`: add lines once, then leave them to the team) isn't used up
-  on deals no calculator applies to yet.
+  properties, and only ever uses up a go-ahead someone gave: it's set only where it switches
+  `syncWhen` off, and only if `syncWhen` doesn't match while its properties are blank (so a
+  gate like `"line_items_added != true"` never gets it). `npm run check` warns otherwise.
 
 ### Formulas
 

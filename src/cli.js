@@ -159,10 +159,12 @@ async function check() {
   const afterSync = Object.entries(config.settings.afterSync);
   if (afterSync.length) {
     const shown = afterSync.map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');
-    const closes = turnsSyncWhenOff(config.settings);
-    if (closes) console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
-    else if (closes === false) console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it will never be set.`);
-    else console.log(`  After each sync: sets ${shown} where that turns settings.syncWhen off (syncWhen also reads other properties, so check can't confirm it).`);
+    const outcome = afterSyncOutcome(config.settings);
+    if (outcome === 'closes') console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
+    else if (outcome === 'stays-open') console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it will never be set.`);
+    else if (outcome === 'open-when-blank') {
+      console.log(`! settings.syncWhen matches while ${afterSync.map(([name]) => name).join(', ')} is blank, so settings.afterSync will never be set: it only uses up a go-ahead someone gives.`);
+    } else console.log(`  After each sync: sets ${shown} where that turns settings.syncWhen off (syncWhen also reads other properties, so check can't confirm it).`);
   }
 
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
@@ -236,18 +238,21 @@ async function check() {
 }
 
 /**
- * Whether settings.afterSync's values make settings.syncWhen false, or null
- * if that depends on other properties.
+ * How settings.afterSync works with settings.syncWhen: "closes" (it withdraws
+ * a go-ahead someone gave), "stays-open" or "open-when-blank" (it is never
+ * set), or "unknown" when that depends on other properties.
  */
-function turnsSyncWhenOff({ syncWhen, afterSync }) {
+function afterSyncOutcome({ syncWhen, afterSync }) {
   const names = Object.keys(afterSync);
-  if (!syncWhen || !names.some((name) => syncWhen.identifiers.includes(name))) return false;
-  if (syncWhen.identifiers.some((name) => !names.includes(name))) return null;
+  if (!syncWhen || !names.some((name) => syncWhen.identifiers.includes(name))) return 'stays-open';
+  if (syncWhen.identifiers.some((name) => !names.includes(name))) return 'unknown';
+  const blank = Object.fromEntries(names.map((name) => [name, null]));
   try {
-    return !truthy(syncWhen.evaluate(normalizeValues(afterSync)));
+    if (truthy(syncWhen.evaluate(normalizeValues(afterSync)))) return 'stays-open';
+    return truthy(syncWhen.evaluate(normalizeValues(blank))) ? 'open-when-blank' : 'closes';
   } catch (err) {
     if (!(err instanceof ExpressionError)) throw err;
-    return null;
+    return 'unknown';
   }
 }
 
