@@ -24,7 +24,8 @@ export const MESSAGES = {
     `Line items were not changed because the calculator output couldn't be turned into line items:\n• ${errors.join('\n• ')}`,
   syncWhenError: (message) => `Line items were not changed: settings.syncWhen: ${message}`,
   alreadyMatch: `Line items already match the calculator. ${REVIEW_HINT}`,
-  afterSyncFailed: (error) => `Line items are up to date, but settings.afterSync could not be saved: ${error}`,
+  afterSyncFailed: (error) =>
+    `Line items are up to date, but settings.afterSync could not be saved: ${error}. Check the property names and values in settings.afterSync ("npm run check" validates them).`,
   noCalculator: 'No calculator applies to this deal, so it has no calculator line items.',
   orphansLeft: (count) =>
     `No calculator in the current config applies to this deal. ${count} line item${count === 1 ? '' : 's'} from calculators no longer in the config ${count === 1 ? 'was' : 'were'} left as ${count === 1 ? 'it is' : 'they are'}.`,
@@ -136,7 +137,10 @@ export function triage(config, properties) {
 
   const evaluation = evaluateCalculators(config, properties);
   const untouched = !properties[DEAL.fingerprint] && !status;
-  if (!evaluation.lines.length && !evaluation.errors.length && untouched) return skip('noop', { evaluation });
+  // Unless the go-ahead was given: that is used up even with no lines to add.
+  if (!evaluation.lines.length && !evaluation.errors.length && untouched && !afterSyncDue(config, properties)) {
+    return skip('noop', { evaluation });
+  }
 
   // Reasons are the same whether skipping or syncing; "skip" only means the
   // deal already shows this status, so a sync would write nothing.

@@ -68,7 +68,7 @@ items on later syncs.
 | Deal has a quote | Nothing changed; status says why (configurable). Not re-checked until the calculator output changes again |
 | "Calculator line items: freeze" ticked | Nothing changed; unticking re-syncs |
 | A calculator input is blank or invalid, or a SKU isn't in the product library | Nothing changed; status "Needs attention" says which property or SKU; re-checked every 15 minutes. Once fixed, only lines whose values changed are re-applied |
-| No calculator applies and the service has never touched the deal | Nothing written |
+| No calculator applies and the service has never touched the deal | Nothing written (unless the deal was given a go-ahead that [`afterSync`](#settings) uses up) |
 
 ### How duplicates are prevented
 
@@ -344,9 +344,12 @@ automation sets once it has validated the calculation:
 
 - Deals are ignored until the status is *Add line items*, then synced within a minute.
 - `afterSync` moves the status on in the same update that marks the deal synced, including when
-  the lines already matched. Later calculator changes then wait until the status is set to *Add
-  line items* again (re-validated). Without `afterSync`, the lines keep following the
-  calculators for as long as the status stays set.
+  the lines already matched or no calculator applies. Later calculator changes then wait until
+  the status is set to *Add line items* again (re-validated). Without `afterSync`, the lines
+  keep following the calculators for as long as the status stays set.
+- If the calculator values or the status change while a sync is running, `afterSync` waits for
+  the next sync (which that change triggers), so it never uses up a go-ahead on output it
+  didn't apply.
 - If a sync can't apply the lines (a blank input, a missing SKU, a quote on the deal), the
   status is left as it is and "Calculator line items: status" says why.
 - Use internal names for the property and the option (`npm run inspect` lists them);
@@ -355,8 +358,9 @@ automation sets once it has validated the calculation:
 - Pick an `afterSync` value no automation reacts to by setting the status back to *Add line
   items*, or the two would keep undoing each other.
 - `afterSync` can't set a calculator input or one of this app's own properties. If it doesn't
-  switch `syncWhen` off (or there's no `syncWhen`), it's simply set whenever line items change,
-  and left alone otherwise.
+  switch `syncWhen` off (or there's no `syncWhen`), it's simply set each time the deal is marked
+  synced (lines applied, or confirmed once an error, freeze or quote hold clears), and left
+  alone otherwise.
 
 ### Formulas
 

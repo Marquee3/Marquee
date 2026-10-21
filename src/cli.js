@@ -162,7 +162,10 @@ async function check() {
     const closes = turnsSyncWhenOff(config.settings);
     if (closes) console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
     else if (closes === false) {
-      console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it won't hold back later calculator changes; it's just set whenever line items change.`);
+      console.log(
+        `! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it won't hold back later calculator changes; ` +
+          "it's just set each time the deal is marked synced.",
+      );
     }
   }
 
@@ -242,7 +245,7 @@ async function check() {
  * told.
  */
 function turnsSyncWhenOff({ syncWhen, afterSync }) {
-  if (!syncWhen) return false;
+  if (!syncWhen || !Object.keys(afterSync).some((name) => syncWhen.identifiers.includes(name))) return false;
   try {
     return !truthy(syncWhen.evaluate(normalizeValues(afterSync)));
   } catch (err) {

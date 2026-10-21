@@ -82,6 +82,11 @@ export class LineItemSync {
     const dealId = String(deal.id);
     const properties = deal.properties ?? {};
     const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
+    // A dry run goes further than a real sync whose triage found nothing to
+    // do, so only report the afterSync values a real sync would write.
+    const t = triage(this.config, properties);
+    const realRunStops = dryRun && !force && (t.reason === 'unchanged' || t.reason === 'quote');
+    const afterSyncOf = (values) => (realRunStops ? {} : afterSyncResult(values));
     const status = async (outcome, statusValue, message, extra = {}, fingerprint) => {
       const saved = await this.#writeStatus(deal, { status: statusValue, message, fingerprint }, dryRun);
       // If the status couldn't be recorded, try again later: until it is,
@@ -89,11 +94,10 @@ export class LineItemSync {
       // lines at all).
       if (!saved.ok) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
       if (saved.afterSyncError) return result('error', saved.afterSyncError, extra);
-      return result(outcome, message, { ...extra, ...afterSyncResult(saved.afterSync) });
+      return result(outcome, message, { ...extra, ...afterSyncOf(saved.afterSync) });
     };
 
     // 1. Decide from the deal's own properties (the poller does the same).
-    const t = triage(this.config, properties);
     if (t.reason === 'syncWhen') {
       // Not written to the deal: syncWhen typically excludes most deals
       // (e.g. closed ones) and a status on each would just be noise.
@@ -113,9 +117,9 @@ export class LineItemSync {
     }
 
     // The go-ahead was given again with nothing to change: just save
-    // settings.afterSync.
+    // settings.afterSync. The deal's message still describes its lines.
     if (!force && !dryRun && t.reason === 'afterSync') {
-      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired: evaluation.lines });
+      return status('unchanged', STATUS.synced, properties[DEAL.message] || MESSAGES.alreadyMatch, { desired: evaluation.lines });
     }
 
     // Nothing to do if every line is what was last applied (decided before
@@ -186,7 +190,7 @@ export class LineItemSync {
 
     const calculatorNames = this.#calculatorNames(plan);
     if (dryRun) {
-      return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncResult(pendingAfterSync(this.config, properties)) });
+      return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncOf(pendingAfterSync(this.config, properties)) });
     }
 
     // 6. Apply.
@@ -238,8 +242,26 @@ export class LineItemSync {
     const sameFingerprint = fingerprint === undefined || (current[DEAL.fingerprint] ?? '') === fingerprint;
     if (sameStatus && sameFingerprint && !(synced && afterSyncDue(this.config, current))) return { ok: true };
 
-    const afterSync = synced ? pendingAfterSync(this.config, current) : {};
+    let afterSync = synced ? pendingAfterSync(this.config, current) : {};
     if (dryRun) return { ok: true, afterSync };
+    if (Object.keys(afterSync).length) {
+      // If the calculator values or the go-ahead changed while this sync ran,
+      // don't use up the go-ahead (or overwrite a newer status) with output
+      // this sync didn't apply. The change itself brings the deal back.
+      const names = [...this.config.dealProperties, ...Object.keys(this.config.settings.afterSync)];
+      let fresh;
+      try {
+        fresh = (await this.hubspot.getDeal(deal.id, names)).properties ?? {};
+      } catch (err) {
+        this.logger.error('could not re-read deal before saving settings.afterSync', { dealId: deal.id, error: describeError(err) });
+        return { ok: false };
+      }
+      if (names.some((name) => (fresh[name] ?? '') !== (current[name] ?? ''))) {
+        this.logger.info('deal changed during sync; settings.afterSync left for the next sync', { dealId: deal.id });
+        afterSync = {};
+        if (sameStatus && sameFingerprint) return { ok: true, afterSync };
+      }
+    }
     const properties = {
       [DEAL.status]: status,
       [DEAL.message]: text,
@@ -257,7 +279,7 @@ export class LineItemSync {
       // Probably an afterSync value HubSpot won't accept (e.g. not one of a
       // dropdown's options). Show that on the deal instead; if this write
       // fails too, the problem was something else.
-      const afterSyncError = truncate(MESSAGES.afterSyncFailed(describeError(err)));
+      const afterSyncError = truncate(MESSAGES.afterSyncFailed(describeError(err, { setupHint: false })));
       const shown = current[DEAL.status] === STATUS.error && sameText(current[DEAL.message], afterSyncError) && sameFingerprint;
       if (shown) return { ok: true, afterSyncError };
       try {
@@ -314,12 +336,12 @@ function isTransient(err) {
   return /fetch failed|network|socket|terminated|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(detail);
 }
 
-function describeError(err) {
+function describeError(err, { setupHint = true } = {}) {
   const message = err?.message ?? String(err);
   if (err instanceof HubSpotError && err.status === 403) {
     return `${message} (the access token lacks a permission this needs; "npm run check" lists what's missing)`;
   }
-  if (/calc_line|PROPERTY_DOESNT_EXIST|does not exist/i.test(message)) {
+  if (setupHint && /calc_line|PROPERTY_DOESNT_EXIST|does not exist/i.test(message)) {
     return `${message} (have the app's custom properties been created? Run "npm run setup".)`;
   }
   return message;

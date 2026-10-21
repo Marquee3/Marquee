@@ -274,7 +274,7 @@ test('afterSync moves the go-ahead on in the same update, so later changes wait 
   const again = await sync.syncDeal('7');
   assert.equal(again.outcome, 'unchanged');
   assert.equal(deal().pricing_status, 'line_items_added');
-  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal', 'updateDeal']);
+  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal', 'getDeal', 'updateDeal'], 're-read just before using up the go-ahead');
 });
 
 test('afterSync is not set when line items could not be applied', async () => {
@@ -311,6 +311,63 @@ test('an afterSync value HubSpot refuses is shown on the deal, and not rewritten
   assert.equal(dealWrites(hubspot).length, writes + 1, 'only the refused attempt; nothing new to show');
   assert.equal(hubspot.writeCalls().length, lineWrites, 'line items left alone');
   assert.deepEqual(lines(), applied);
+});
+
+test('a go-ahead on a deal with no calculator lines is used up too', async () => {
+  const { hubspot, sync, deal, lines } = setup({ pricing_status: 'add_line_items', rooms: '', users: '' }, { config: GATED });
+  assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
+  assert.equal(deal().pricing_status, 'line_items_added');
+  assert.match(deal().calc_line_items_message, /No calculator applies/);
+  // A later, unvalidated change waits.
+  hubspot.editDeal('7', { users: '5' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.deepEqual(lines(), []);
+});
+
+test('a repeated go-ahead keeps the deal\'s message', async () => {
+  const { hubspot, sync, deal } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  await sync.syncDeal('7');
+  const message = deal().calc_line_items_message;
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  await sync.syncDeal('7');
+  assert.equal(deal().pricing_status, 'line_items_added');
+  assert.equal(deal().calc_line_items_message, message);
+});
+
+test('afterSync is left for the next sync if the deal changes while syncing', async () => {
+  const { hubspot, sync, deal, lines } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  hubspot.beforeCreate = async () => {
+    hubspot.beforeCreate = null;
+    hubspot.editDeal('7', { users: '95' }); // e.g. the calculator saving again, already validated
+  };
+  const first = await sync.syncDeal('7');
+  assert.equal(first.outcome, 'synced');
+  assert.equal(first.afterSync, undefined);
+  assert.equal(deal().pricing_status, 'add_line_items', 'go-ahead not used up by output this sync did not apply');
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(seats(lines()), '95');
+  assert.equal(deal().pricing_status, 'line_items_added');
+});
+
+test('plan only reports afterSync when a sync would write it', async () => {
+  const config = { ...structuredClone(CONFIG), settings: { afterSync: { line_items_ready: true } } };
+  const { hubspot, sync } = setup({}, { config });
+  await sync.syncDeal('7');
+  hubspot.editDeal('7', { line_items_ready: 'false' });
+  const plan = await sync.syncDeal('7', { dryRun: true });
+  assert.equal(plan.afterSync, undefined);
+});
+
+test('a refused afterSync property does not suggest "npm run setup"', async () => {
+  const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  hubspot.failUpdateDeal = async (_, properties) => {
+    if ('pricing_status' in properties) {
+      throw new HubSpotError({ status: 400, method: 'PATCH', path: '/crm/objects/2026-09/deals/7', body: { message: 'Property "pricing_status" does not exist' } });
+    }
+  };
+  const result = await sync.syncDeal('7');
+  assert.doesNotMatch(result.message, /npm run setup/);
+  assert.match(result.message, /Check the property names and values in settings\.afterSync/);
 });
 
 test('an afterSync that does not end the go-ahead is only set alongside other changes', async () => {

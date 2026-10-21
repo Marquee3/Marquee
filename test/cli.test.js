@@ -220,5 +220,9 @@ test('check validates settings.afterSync against the property\'s options', async
 
     await settings({ pricing_status: 'add_line_items' });
     assert.match((await cliWithToken(['check'], dir, base)).stdout, /doesn't turn settings\.syncWhen off/);
+
+    // A property the gate doesn't read can't switch it off.
+    await settings({ seats_checked: true });
+    assert.match((await cli(['check'], dir)).stdout, /doesn't turn settings\.syncWhen off/);
   });
 });
