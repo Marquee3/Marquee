@@ -20,6 +20,6 @@
     "start": "node src/server.js"
   },
   "devDependencies": {
-    "wrangler": "4.148.0"
+    "wrangler": "4.151.3"
   }
 }
