@@ -360,7 +360,8 @@ automation sets once it has validated the calculation:
 - `afterSync` needs `syncWhen`, can't set a calculator input or one of this app's own
   properties, and only ever uses up a go-ahead someone gave: it's set only where it switches
   `syncWhen` off, and only if `syncWhen` doesn't match while its properties are blank (so a
-  gate like `"line_items_added != true"` never gets it). `npm run check` warns otherwise.
+  gate like `"line_items_added != true"` never gets it). `npm run check` warns when it can
+  never be set.
 
 ### Formulas
 

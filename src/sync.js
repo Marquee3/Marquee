@@ -158,9 +158,8 @@ export class LineItemSync {
 
     // 3. Every line already matches what was last applied (the status just
     // needs to say so, e.g. after an error was fixed).
-    if (!force && !dryRun && stored && changedKeys(stored, fingerprints).size === 0) {
-      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired }, fingerprint);
-    }
+    const upToDate = !force && stored && changedKeys(stored, fingerprints).size === 0;
+    if (upToDate && !dryRun) return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired }, fingerprint);
 
     // 4. Compare with the deal's current line items. Only lines whose
     // calculated values changed are re-applied (all of them when forced, or
@@ -168,6 +167,13 @@ export class LineItemSync {
     const scope = force || !stored ? null : changedKeys(stored, fingerprints);
     const existing = await this.#readLineItems(dealId);
     const plan = planReconciliation(desired, existing, { calculatorIds: this.calculatorIds, scope });
+    // A dry run reads the lines so plan can list them, but reports what a
+    // real run does (step 3): nothing changed.
+    if (upToDate) {
+      const keep = [...plan.keep, ...plan.reorder, ...plan.archive].map(({ id, key }) => ({ id, key }));
+      const shown = { ...plan, create: [], update: [], reorder: [], archive: [], keep };
+      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired, plan: shown }, fingerprint);
+    }
 
     if (isEmptyPlan(plan)) {
       // A forced sync of a deal the service doesn't manage leaves no trace.

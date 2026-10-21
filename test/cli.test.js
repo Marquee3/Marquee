@@ -229,10 +229,13 @@ test('check validates settings.afterSync against the property\'s options', async
     await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'line_items_added != true', afterSync: { line_items_added: true } }));
     assert.match((await cli(['check'], dir)).stdout, /will never be set/);
 
-    // A gate that also reads other properties: check can't be sure either way.
-    await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'pricing_status == "add_line_items" && seats_confirmed', afterSync: { pricing_status: 'add_line_items' } }));
-    const compound = (await cli(['check'], dir)).stdout;
-    assert.doesNotMatch(compound, /so later changes wait/);
-    assert.match(compound, /syncWhen also reads other properties/);
+    // Gates that also read other properties.
+    const gate = async (syncWhen, afterSync) => {
+      await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen, afterSync }));
+      return (await cli(['check'], dir)).stdout;
+    };
+    assert.match(await gate('pricing_status == "add_line_items" && dealstage != "closedlost"', { pricing_status: 'line_items_added' }), /so later changes wait/);
+    assert.match(await gate('pricing_status == "add_line_items" && seats_confirmed', { pricing_status: 'add_line_items' }), /doesn't turn settings\.syncWhen off/);
+    assert.match(await gate('pricing_status == "validated" && line_items_added != true', { line_items_added: true }), /will never be set/);
   });
 });

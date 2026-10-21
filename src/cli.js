@@ -160,11 +160,12 @@ async function check() {
   if (afterSync.length) {
     const shown = afterSync.map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');
     const outcome = afterSyncOutcome(config.settings);
+    const names = afterSync.map(([name]) => name).join(', ');
     if (outcome === 'closes') console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
     else if (outcome === 'stays-open') console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it will never be set.`);
     else if (outcome === 'open-when-blank') {
-      console.log(`! settings.syncWhen matches while ${afterSync.map(([name]) => name).join(', ')} is blank, so settings.afterSync will never be set: it only uses up a go-ahead someone gives.`);
-    } else console.log(`  After each sync: sets ${shown} where that turns settings.syncWhen off (syncWhen also reads other properties, so check can't confirm it).`);
+      console.log(`! settings.syncWhen matches while ${names} is blank, so settings.afterSync will never be set: it only uses up a go-ahead someone gives.`);
+    } else console.log(`  After each sync: sets ${shown} where that uses up a go-ahead (syncWhen is too complex for check to confirm it ever does).`);
   }
 
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
@@ -238,22 +239,37 @@ async function check() {
 }
 
 /**
- * How settings.afterSync works with settings.syncWhen: "closes" (it withdraws
- * a go-ahead someone gave), "stays-open" or "open-when-blank" (it is never
- * set), or "unknown" when that depends on other properties.
+ * How settings.afterSync works with settings.syncWhen, found by trying the
+ * properties syncWhen reads with blank, true, false and values near those
+ * it mentions. "closes": on some deal it uses up a go-ahead someone gave (the
+ * rule afterSyncDue applies). Otherwise it is never set: "stays-open" if it
+ * never switches syncWhen off, "open-when-blank" if syncWhen also matches
+ * with its properties blank. "unknown" if there are too many combinations.
  */
 function afterSyncOutcome({ syncWhen, afterSync }) {
-  const names = Object.keys(afterSync);
-  if (!syncWhen || !names.some((name) => syncWhen.identifiers.includes(name))) return 'stays-open';
-  if (syncWhen.identifiers.some((name) => !names.includes(name))) return 'unknown';
-  const blank = Object.fromEntries(names.map((name) => [name, null]));
-  try {
-    if (truthy(syncWhen.evaluate(normalizeValues(afterSync)))) return 'stays-open';
-    return truthy(syncWhen.evaluate(normalizeValues(blank))) ? 'open-when-blank' : 'closes';
-  } catch (err) {
-    if (!(err instanceof ExpressionError)) throw err;
-    return 'unknown';
-  }
+  if (!syncWhen) return 'stays-open';
+  const numbers = syncWhen.literals.filter((v) => typeof v === 'number').flatMap((n) => [n - 1, n, n + 1]);
+  const candidates = [...new Set([null, true, false, ...syncWhen.literals.filter((v) => typeof v === 'string'), ...numbers])];
+  const names = syncWhen.identifiers;
+  if (candidates.length ** names.length > 20_000) return 'unknown';
+  const matches = (values) => {
+    try {
+      return truthy(syncWhen.evaluate(normalizeValues(values)));
+    } catch (err) {
+      if (!(err instanceof ExpressionError)) throw err;
+      return false;
+    }
+  };
+  const blank = Object.fromEntries(Object.keys(afterSync).map((name) => [name, null]));
+  let closes = false;
+  const tryAll = (values, i) => {
+    if (i < names.length) return candidates.some((value) => tryAll({ ...values, [names[i]]: value }, i + 1));
+    if (!matches(values) || matches({ ...values, ...afterSync })) return false;
+    closes = true;
+    return !matches({ ...values, ...blank });
+  };
+  if (tryAll({}, 0)) return 'closes';
+  return closes ? 'open-when-blank' : 'stays-open';
 }
 
 /**

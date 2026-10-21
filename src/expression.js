@@ -56,6 +56,7 @@ export function compile(source) {
   return {
     source: String(source),
     identifiers: [...collectIdentifiers(ast, new Set())],
+    literals: [...collectLiterals(ast, new Set())],
     evaluate: (values) => evaluate(ast, values),
     evaluateNumber: (values) => toNumber(evaluate(ast, values), ast),
   };
@@ -301,6 +302,14 @@ function collectIdentifiers(node, names) {
       break;
   }
   return names;
+}
+
+function collectLiterals(node, values) {
+  if (node.type === 'literal') values.add(node.value);
+  for (const child of [node.operand, node.left, node.right, ...(node.args ?? [])]) {
+    if (child) collectLiterals(child, values);
+  }
+  return values;
 }
 
 // --- Evaluator -----------------------------------------------------------------

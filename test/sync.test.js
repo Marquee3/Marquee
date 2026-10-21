@@ -373,6 +373,21 @@ test('afterSync only uses up a go-ahead someone gave, not a gate that is open by
   assert.equal(seats(lines()), '95');
 });
 
+test('plan reports what a real sync does once a fixed error leaves the lines matching', async () => {
+  const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  await sync.syncDeal('7');
+  hubspot.dealLineItems('7')[0].properties.hs_position_on_quote = '9'; // moved by the team
+  hubspot.quotes.set('7', ['q1']);
+  hubspot.editDeal('7', { unit_rate: '', pricing_status: 'add_line_items' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  hubspot.editDeal('7', { unit_rate: '9.5' });
+  const plan = await sync.syncDeal('7', { dryRun: true });
+  assert.ok(plan.plan, 'plan still lists the deal\'s lines');
+  const real = await sync.syncDeal('7');
+  assert.equal(real.outcome, 'unchanged');
+  assert.deepEqual([plan.outcome, plan.message, plan.afterSync], [real.outcome, real.message, real.afterSync]);
+});
+
 test('plan does not report afterSync for a deal held back by a quote', async () => {
   const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
   await sync.syncDeal('7');
