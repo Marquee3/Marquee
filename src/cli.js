@@ -161,12 +161,8 @@ async function check() {
     const shown = afterSync.map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');
     const closes = turnsSyncWhenOff(config.settings);
     if (closes) console.log(`  After each sync: sets ${shown}, so later changes wait until settings.syncWhen matches again.`);
-    else if (closes === false) {
-      console.log(
-        `! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it won't hold back later calculator changes; ` +
-          "it's just set each time the deal is marked synced.",
-      );
-    }
+    else if (closes === false) console.log(`! settings.afterSync (${shown}) doesn't turn settings.syncWhen off, so it will never be set.`);
+    else console.log(`  After each sync: sets ${shown} where that turns settings.syncWhen off (syncWhen also reads other properties, so check can't confirm it).`);
   }
 
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
@@ -240,12 +236,13 @@ async function check() {
 }
 
 /**
- * Whether filling in settings.afterSync's values makes settings.syncWhen
- * false (judged with only those values filled in), or null if that can't be
- * told.
+ * Whether settings.afterSync's values make settings.syncWhen false, or null
+ * if that depends on other properties.
  */
 function turnsSyncWhenOff({ syncWhen, afterSync }) {
-  if (!syncWhen || !Object.keys(afterSync).some((name) => syncWhen.identifiers.includes(name))) return false;
+  const names = Object.keys(afterSync);
+  if (!syncWhen || !names.some((name) => syncWhen.identifiers.includes(name))) return false;
+  if (syncWhen.identifiers.some((name) => !names.includes(name))) return null;
   try {
     return !truthy(syncWhen.evaluate(normalizeValues(afterSync)));
   } catch (err) {

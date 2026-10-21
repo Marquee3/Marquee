@@ -329,7 +329,7 @@ One calculator per file in `config/calculators/`:
 | `skipWhenQuoteExists` | `true` | Leave a deal's line items alone once it has a quote |
 | `setLineOrder` | `true` | Keep calculator lines in config order (`hs_position_on_quote`), applied whenever the deal syncs. Turn off to order lines by hand |
 | `syncWhen` | none | Formula; deals that don't match are ignored entirely, e.g. `"dealstage != \"closedwon\""` |
-| `afterSync` | none | Deal properties to set once the line items are in place, e.g. `{ "pricing_status": "line_items_added" }` (see below) |
+| `afterSync` | none | With `syncWhen`: deal properties that use up the go-ahead once the line items are in place, e.g. `{ "pricing_status": "line_items_added" }` (see below) |
 
 **Only add line items once the pricing has been checked.** By default line items follow the
 calculators automatically. To wait for a go-ahead instead, such as a *Pricing status* that an
@@ -357,10 +357,11 @@ automation sets once it has validated the calculation:
   HubSpot refuses the value anyway, the deal shows "Needs attention" with HubSpot's reason.
 - Pick an `afterSync` value no automation reacts to by setting the status back to *Add line
   items*, or the two would keep undoing each other.
-- `afterSync` can't set a calculator input or one of this app's own properties. If it doesn't
-  switch `syncWhen` off (or there's no `syncWhen`), it's simply set each time the deal is marked
-  synced (lines applied, or confirmed once an error, freeze or quote hold clears), and left
-  alone otherwise.
+- `afterSync` needs `syncWhen`, can't set a calculator input or one of this app's own
+  properties, and is only ever set where it switches `syncWhen` off.
+- A gate that is open until `afterSync` closes it (e.g. `"line_items_added != true"` with
+  `{ "line_items_added": true }`: add lines once, then leave them to the team) isn't used up
+  on deals no calculator applies to yet.
 
 ### Formulas
 

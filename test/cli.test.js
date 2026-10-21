@@ -224,5 +224,11 @@ test('check validates settings.afterSync against the property\'s options', async
     // A property the gate doesn't read can't switch it off.
     await settings({ seats_checked: true });
     assert.match((await cli(['check'], dir)).stdout, /doesn't turn settings\.syncWhen off/);
+
+    // A gate that also reads other properties: check can't be sure either way.
+    await writeFile(join(dir, 'settings.json'), JSON.stringify({ syncWhen: 'pricing_status == "add_line_items" && seats_confirmed', afterSync: { pricing_status: 'add_line_items' } }));
+    const compound = (await cli(['check'], dir)).stdout;
+    assert.doesNotMatch(compound, /so later changes wait/);
+    assert.match(compound, /syncWhen also reads other properties/);
   });
 });

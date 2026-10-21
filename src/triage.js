@@ -137,8 +137,8 @@ export function triage(config, properties) {
 
   const evaluation = evaluateCalculators(config, properties);
   const untouched = !properties[DEAL.fingerprint] && !status;
-  // Unless the go-ahead was given: that is used up even with no lines to add.
-  if (!evaluation.lines.length && !evaluation.errors.length && untouched && !afterSyncDue(config, properties)) {
+  // Unless someone gave the go-ahead: that is used up even with no lines to add.
+  if (!evaluation.lines.length && !evaluation.errors.length && untouched && !goAheadGiven(config, properties)) {
     return skip('noop', { evaluation });
   }
 
@@ -180,11 +180,11 @@ export function pendingAfterSync(config, properties) {
 }
 
 /**
- * Whether settings.afterSync turns settings.syncWhen off (it withdraws the
- * go-ahead) and hasn't been saved yet. It is then saved even when the line
- * items haven't changed, so later calculator changes wait for the next
- * go-ahead. An afterSync that doesn't turn syncWhen off is only saved
- * alongside other changes, so it never fights edits the team makes to it.
+ * Whether settings.afterSync is due: the go-ahead (settings.syncWhen) is
+ * open, and saving afterSync would close it. It is then saved with the next
+ * synced status, even when the line items haven't changed, so later
+ * calculator changes wait for the next go-ahead. An afterSync that doesn't
+ * close syncWhen is never saved.
  */
 export function afterSyncDue(config, properties) {
   const { syncWhen, afterSync } = config.settings;
@@ -194,6 +194,20 @@ export function afterSyncDue(config, properties) {
   } catch (err) {
     if (!(err instanceof ExpressionError)) throw err;
     return false;
+  }
+}
+
+// Due, and not just because the afterSync properties are blank, as on a new
+// deal with a gate like "line_items_added != true".
+function goAheadGiven(config, properties) {
+  if (!afterSyncDue(config, properties)) return false;
+  const { syncWhen, afterSync } = config.settings;
+  const blank = Object.fromEntries(Object.keys(afterSync).map((name) => [name, null]));
+  try {
+    return !truthy(syncWhen.evaluate(normalizeValues({ ...properties, ...blank })));
+  } catch (err) {
+    if (!(err instanceof ExpressionError)) throw err;
+    return true;
   }
 }
 

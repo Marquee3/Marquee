@@ -161,12 +161,15 @@ test('$-prefixed keys are treated as comments', () => {
 });
 
 test('settings.afterSync: values are kept as text; bad entries are reported', () => {
-  const ok = parseConfig({ settings: { afterSync: { $comment: 'x', pricing_status: 'line_items_added', ready: true, stage_number: 3 } }, calculators: [] });
+  const ok = parseConfig({
+    settings: { syncWhen: 'pricing_status == "add_line_items"', afterSync: { $comment: 'x', pricing_status: 'line_items_added', ready: true, stage_number: 3 } },
+    calculators: [],
+  });
   assert.deepEqual(ok.settings.afterSync, { pricing_status: 'line_items_added', ready: 'true', stage_number: '3' });
   assert.deepEqual(parseConfig({ calculators: [] }).settings.afterSync, {});
 
   const problems = problemsOf({
-    settings: { afterSync: { 'Pricing status': 'x', calc_line_items_status: 'synced', nested: { a: 1 }, seats: 0 } },
+    settings: { syncWhen: 'go', afterSync: { 'Pricing status': 'x', calc_line_items_status: 'synced', nested: { a: 1 }, seats: 0 } },
     calculators: [{ id: 'c', appliesWhen: 'seats > 0', lineItems: [{ key: 'x', product: { id: '1' }, quantity: 'seats' }] }],
   });
   assert.equal(problems.length, 4, problems.join('\n'));
@@ -174,7 +177,8 @@ test('settings.afterSync: values are kept as text; bad entries are reported', ()
   assert.match(problems[1], /calc_line_items_status: this is one of the app's own properties/);
   assert.match(problems[2], /nested: expected text, a number, or true\/false/);
   assert.match(problems[3], /seats: a calculator reads this property/);
-  assert.match(problemsOf({ settings: { afterSync: 'line_items_added' }, calculators: [] })[0], /settings\.afterSync: expected deal property names and values/);
+  assert.match(problemsOf({ settings: { syncWhen: 'go', afterSync: 'line_items_added' }, calculators: [] })[0], /settings\.afterSync: expected deal property names and values/);
+  assert.match(problemsOf({ settings: { afterSync: { go: false } }, calculators: [] })[0], /settings\.afterSync: needs settings\.syncWhen/);
 });
 
 test('product ids must be numeric', () => {

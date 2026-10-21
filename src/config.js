@@ -77,6 +77,9 @@ export function parseConfig(raw) {
     syncWhen: compileField(rawSettings.syncWhen, 'settings.syncWhen', conditionProperties),
     afterSync: parseAfterSync(rawSettings.afterSync, problems),
   };
+  if (Object.keys(settings.afterSync).length && rawSettings.syncWhen === undefined) {
+    problems.push('settings.afterSync: needs settings.syncWhen (afterSync uses up the go-ahead that syncWhen waits for)');
+  }
   for (const name of ['skipWhenQuoteExists', 'setLineOrder']) {
     if (typeof settings[name] !== 'boolean') problems.push(`settings.${name}: expected true or false`);
   }
@@ -170,8 +173,8 @@ export function parseConfig(raw) {
   };
 }
 
-// Deal properties to set once a deal's line items are in place, e.g. to move
-// a status on so later calculator changes wait for the next go-ahead.
+// Deal properties to set once a deal's line items are in place, to move the
+// go-ahead (settings.syncWhen) on so later calculator changes wait for the next one.
 // Values are kept as text, the way HubSpot returns them.
 function parseAfterSync(value, problems) {
   if (value === undefined) return {};

@@ -82,22 +82,19 @@ export class LineItemSync {
     const dealId = String(deal.id);
     const properties = deal.properties ?? {};
     const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
-    // A dry run goes further than a real sync whose triage found nothing to
-    // do, so only report the afterSync values a real sync would write.
-    const t = triage(this.config, properties);
-    const realRunStops = dryRun && !force && (t.reason === 'unchanged' || t.reason === 'quote');
-    const afterSyncOf = (values) => (realRunStops ? {} : afterSyncResult(values));
-    const status = async (outcome, statusValue, message, extra = {}, fingerprint) => {
-      const saved = await this.#writeStatus(deal, { status: statusValue, message, fingerprint }, dryRun);
+    // dealText is what the deal shows, when it differs from the result message.
+    const status = async (outcome, statusValue, message, extra = {}, fingerprint, dealText = message) => {
+      const saved = await this.#writeStatus(deal, { status: statusValue, message: dealText, fingerprint }, dryRun);
       // If the status couldn't be recorded, try again later: until it is,
       // the deal may not show what was applied (or that it has calculator
       // lines at all).
       if (!saved.ok) return result('error', `${message} (but the status could not be saved; will retry)`, { ...extra, retry: true });
       if (saved.afterSyncError) return result('error', saved.afterSyncError, extra);
-      return result(outcome, message, { ...extra, ...afterSyncOf(saved.afterSync) });
+      return result(outcome, message, { ...extra, ...afterSyncResult(saved.afterSync) });
     };
 
     // 1. Decide from the deal's own properties (the poller does the same).
+    const t = triage(this.config, properties);
     if (t.reason === 'syncWhen') {
       // Not written to the deal: syncWhen typically excludes most deals
       // (e.g. closed ones) and a status on each would just be noise.
@@ -118,8 +115,9 @@ export class LineItemSync {
 
     // The go-ahead was given again with nothing to change: just save
     // settings.afterSync. The deal's message still describes its lines.
-    if (!force && !dryRun && t.reason === 'afterSync') {
-      return status('unchanged', STATUS.synced, properties[DEAL.message] || MESSAGES.alreadyMatch, { desired: evaluation.lines });
+    if (!force && t.reason === 'afterSync') {
+      const dealText = properties[DEAL.message] || MESSAGES.alreadyMatch;
+      return status('unchanged', STATUS.synced, 'No line item changes needed.', { desired: evaluation.lines }, undefined, dealText);
     }
 
     // Nothing to do if every line is what was last applied (decided before
@@ -190,7 +188,8 @@ export class LineItemSync {
 
     const calculatorNames = this.#calculatorNames(plan);
     if (dryRun) {
-      return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncOf(pendingAfterSync(this.config, properties)) });
+      const afterSync = afterSyncDue(this.config, properties) ? pendingAfterSync(this.config, properties) : {};
+      return result('synced', describePlan(plan, calculatorNames), { desired, plan, ...afterSyncResult(afterSync) });
     }
 
     // 6. Apply.
@@ -211,8 +210,11 @@ export class LineItemSync {
         }
       }
     } catch (err) {
+      // Lines being changed are in an unknown state: mark them so the next
+      // sync re-checks them, whether or not the output still includes them.
       const uncertain = scope ?? new Set([...(stored?.keys() ?? []), ...fingerprints.keys()]);
-      err.fingerprintAfterFailure = formatFingerprint(new Map([...(storedAll ?? [])].filter(([key]) => !uncertain.has(key))));
+      const known = [...(storedAll ?? [])].filter(([key]) => !uncertain.has(key));
+      err.fingerprintAfterFailure = formatFingerprint(new Map([...known, ...[...uncertain].map((key) => [key, UNKNOWN])]));
       throw err;
     }
 
@@ -227,8 +229,8 @@ export class LineItemSync {
 
   /**
    * Write the sync status to the deal, plus settings.afterSync when the
-   * status is synced. Returns { ok: false } if the write failed, and an
-   * afterSyncError if HubSpot refused the afterSync values.
+   * status is synced and afterSync is due. Returns { ok: false } if the write
+   * failed, and an afterSyncError if HubSpot refused the afterSync values.
    */
   async #writeStatus(deal, { status, message, fingerprint }, dryRun) {
     const text = truncate(message);
@@ -240,9 +242,8 @@ export class LineItemSync {
     const synced = status === STATUS.synced;
     const sameStatus = current[DEAL.status] === status && sameText(current[DEAL.message], text);
     const sameFingerprint = fingerprint === undefined || (current[DEAL.fingerprint] ?? '') === fingerprint;
-    if (sameStatus && sameFingerprint && !(synced && afterSyncDue(this.config, current))) return { ok: true };
-
-    let afterSync = synced ? pendingAfterSync(this.config, current) : {};
+    let afterSync = synced && afterSyncDue(this.config, current) ? pendingAfterSync(this.config, current) : {};
+    if (sameStatus && sameFingerprint && !Object.keys(afterSync).length) return { ok: true };
     if (dryRun) return { ok: true, afterSync };
     if (Object.keys(afterSync).length) {
       // If the calculator values or the go-ahead changed while this sync ran,
@@ -325,6 +326,9 @@ function describePlan(plan, calculatorNames, duplicatesRemoved = 0) {
 }
 
 // Worth retrying: rate limits, HubSpot outages and network failures.
+// Fingerprint value for a line whose last update may have partly failed.
+const UNKNOWN = 'unknown';
+
 // settings.afterSync values set (or that a dry run would set), if any.
 function afterSyncResult(values) {
   return values && Object.keys(values).length ? { afterSync: values } : {};

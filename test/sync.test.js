@@ -329,7 +329,8 @@ test('a repeated go-ahead keeps the deal\'s message', async () => {
   await sync.syncDeal('7');
   const message = deal().calc_line_items_message;
   hubspot.editDeal('7', { pricing_status: 'add_line_items' });
-  await sync.syncDeal('7');
+  const result = await sync.syncDeal('7');
+  assert.equal(result.message, 'No line item changes needed.', 'nothing was added this time');
   assert.equal(deal().pricing_status, 'line_items_added');
   assert.equal(deal().calc_line_items_message, message);
 });
@@ -349,13 +350,45 @@ test('afterSync is left for the next sync if the deal changes while syncing', as
   assert.equal(deal().pricing_status, 'line_items_added');
 });
 
-test('plan only reports afterSync when a sync would write it', async () => {
-  const config = { ...structuredClone(CONFIG), settings: { afterSync: { line_items_ready: true } } };
-  const { hubspot, sync } = setup({}, { config });
+test('plan takes the same shortcut as a real sync when the go-ahead is given again', async () => {
+  const { hubspot, sync } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
   await sync.syncDeal('7');
-  hubspot.editDeal('7', { line_items_ready: 'false' });
+  hubspot.dealLineItems('7')[0].properties.hs_position_on_quote = '9'; // moved by the team
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
   const plan = await sync.syncDeal('7', { dryRun: true });
-  assert.equal(plan.afterSync, undefined);
+  assert.equal(plan.outcome, 'unchanged');
+  assert.deepEqual(plan.afterSync, { pricing_status: 'line_items_added' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
+});
+
+test('a gate that is open by default is not used up before any calculator applies', async () => {
+  const config = { ...structuredClone(CONFIG), settings: { syncWhen: 'line_items_added != true', afterSync: { line_items_added: true } } };
+  const { hubspot, sync, deal, lines } = setup({ rooms: '', users: '' }, { config });
+  assert.equal((await sync.syncDeal('7')).outcome, 'noop');
+  assert.equal(deal().line_items_added, undefined);
+  hubspot.editDeal('7', { users: '80' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(deal().line_items_added, 'true');
+  hubspot.editDeal('7', { users: '95' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.equal(seats(lines()), '80');
+});
+
+test('after a partly failed update, a line that is no longer wanted is still removed', async () => {
+  const { hubspot, sync, lines } = setup();
+  await sync.syncDeal('7');
+  hubspot.editDeal('7', { users: '95' });
+  const update = hubspot.updateLineItems;
+  hubspot.updateLineItems = async () => {
+    throw new HubSpotError({ status: 400, method: 'POST', path: '/crm/objects/2026-09/line_items/batch/update', body: { message: 'rejected' } });
+  };
+  assert.equal((await sync.syncDeal('7')).outcome, 'error');
+  hubspot.updateLineItems = update;
+  // The licence calculator no longer applies, so its line must go, even
+  // though its last update failed part-way.
+  hubspot.editDeal('7', { users: '' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(lines().find((l) => l.key === 'licences:seats'), undefined);
 });
 
 test('a refused afterSync property does not suggest "npm run setup"', async () => {
@@ -370,18 +403,12 @@ test('a refused afterSync property does not suggest "npm run setup"', async () =
   assert.match(result.message, /Check the property names and values in settings\.afterSync/);
 });
 
-test('an afterSync that does not end the go-ahead is only set alongside other changes', async () => {
+test('an afterSync that does not end the go-ahead is never set', async () => {
+  // syncWhen here excludes closed deals; setting line_items_ready doesn't change that.
   const config = { ...structuredClone(CONFIG), settings: { ...CONFIG.settings, afterSync: { line_items_ready: true } } };
-  const { hubspot, sync, deal } = setup({}, { config });
-  await sync.syncDeal('7');
-  assert.equal(deal().line_items_ready, 'true');
-  // Cleared by the team (e.g. a workflow that acted on it): left cleared.
-  hubspot.editDeal('7', { line_items_ready: 'false' });
-  assert.equal((await sync.syncDeal('7')).outcome, 'unchanged');
-  assert.equal(deal().line_items_ready, 'false');
-  hubspot.editDeal('7', { users: '95' });
-  await sync.syncDeal('7');
-  assert.equal(deal().line_items_ready, 'true');
+  const { sync, deal } = setup({}, { config });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(deal().line_items_ready, undefined);
 });
 
 test('deals no calculator applies to are left untouched', async () => {
@@ -427,9 +454,9 @@ test('HubSpot failures are reported on the deal', async () => {
   const result = await sync.syncDeal('7');
   assert.equal(result.outcome, 'error');
   assert.equal(deal().calc_line_items_status, 'error');
-  // The lines being created are in an unknown state, so their fingerprints
-  // are dropped (here: all of them, as it was the first sync).
-  assert.equal(deal().calc_line_items_fingerprint, 'v2');
+  // The lines being created are in an unknown state, so they are marked for
+  // the next sync to re-check (here: all of them, as it was the first sync).
+  assert.equal(deal().calc_line_items_fingerprint, 'v2;hardware:mounts=unknown;hardware:units=unknown;licences:seats=unknown');
   assert.match(deal().calc_line_items_message, /Run "npm run setup"/);
 });
 
