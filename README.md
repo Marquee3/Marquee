@@ -92,6 +92,8 @@ properties**. To support a new one:
 1. **Make sure its outputs are deal properties**, and note their *internal* names.
    `npm run inspect` lists every custom deal property with its internal name and type, and every
    product with its SKU (or see Settings → Properties in HubSpot).
+   `npm run inspect -- <deal id> --group <group>` shows a priced deal's values in that group, and
+   the line items already on it.
 2. **Make sure its products are in the product library** with a SKU (or note their product IDs).
 3. **Create the calculator file:**
 
@@ -183,6 +185,7 @@ cp .env.example .env              # add HUBSPOT_ACCESS_TOKEN, for the commands b
 npm test                          # unit tests, no HubSpot needed
 npm run setup                     # create the app's deal + line item properties (safe to re-run)
 npm run inspect                   # list custom deal properties and products, for writing calculators
+npm run inspect -- 123 --group g  # one deal's values in property group g, and its line items
 npm run new-calculator -- …       # add your first calculator (see above)
 npm run check                     # token's account and permissions; config valid; properties and SKUs exist?
 npm run plan -- 123456789         # dry run on a real deal: shows the lines and changes, writes nothing

@@ -26,6 +26,8 @@ const USAGE = `Usage: node src/cli.js <command>   (or npm run <command> -- <args
   setup                        Create the deal and line item properties the app uses (safe to re-run).
   inspect                      List the account's custom deal properties and products (with SKUs),
                                for writing calculator files. Read-only.
+  inspect <dealId> [--group G] Show one deal's custom property values (only group G, e.g.
+                               pvc_pricing_calculator) and its line items. Read-only.
   plan <dealId> [--force]      Show the line items a sync would produce and what it would change,
                                without changing anything.
   sync <dealId>...             Sync these deals now.
@@ -48,7 +50,7 @@ async function main(argv) {
     const index = rest.indexOf(`--${name}`);
     return index >= 0 ? rest[index + 1] : undefined;
   };
-  const valued = new Set(['--calculator', '--target-url']);
+  const valued = new Set(['--calculator', '--target-url', '--group']);
   const args = rest.filter((a, i) => !a.startsWith('--') && !valued.has(rest[i - 1]));
 
   switch (command) {
@@ -60,7 +62,7 @@ async function main(argv) {
     case 'setup':
       return setup();
     case 'inspect':
-      return inspect();
+      return args.length ? inspectDeal(args[0], option('group')) : inspect();
     case 'plan':
       if (args.length !== 1) return usage();
       return plan(args[0], { force: flags.has('--force') });
@@ -365,6 +367,61 @@ async function inspect() {
     console.log('  ✗ The token lacks permission to read products (e-commerce).');
   }
   return problems ? 1 : 0;
+}
+
+/** One deal's custom property values (optionally one group of them) and its line items. */
+async function inspectDeal(dealId, group) {
+  const hubspot = client();
+  let definitions;
+  try {
+    definitions = (await hubspot.getProperties('deals'))
+      .filter((p) => !p.hubspotDefined && !p.archived && (!group || p.groupName === group))
+      .sort((a, b) => String(a.groupName).localeCompare(String(b.groupName)) || a.name.localeCompare(b.name));
+  } catch (err) {
+    if (!(err instanceof HubSpotError && err.status === 403)) throw err;
+    console.log('✗ The token lacks crm.schemas.deals.read, so deal properties can\'t be listed.');
+    return 1;
+  }
+  if (!definitions.length) {
+    console.log(`No custom deal properties${group ? ` in group "${group}" ("npm run inspect" lists the groups)` : ''}.`);
+    return 1;
+  }
+  let deal;
+  try {
+    deal = await hubspot.getDeal(dealId, definitions.map((p) => p.name));
+  } catch (err) {
+    if (!(err instanceof HubSpotError && err.status === 404)) throw err;
+    console.log(`✗ Deal ${dealId} not found.`);
+    return 1;
+  }
+
+  console.log(`Deal ${dealId}: ${group ? `properties in [${group}]` : 'custom properties'} that have a value\n`);
+  if (!group) console.log('  (All groups: this may include addresses or other customer details. Check before sharing.)\n');
+  let shown = 0;
+  let current = null;
+  for (const p of definitions) {
+    const value = deal.properties?.[p.name];
+    if (value === null || value === undefined || value === '') continue;
+    if (!group && p.groupName !== current) {
+      current = p.groupName;
+      console.log(`  [${current}]`);
+    }
+    console.log(`    ${p.name.padEnd(40)} ${value}`);
+    shown++;
+  }
+  if (!shown) console.log('    (none)');
+
+  const ids = await hubspot.getAssociatedIds('deals', dealId, 'line_items');
+  console.log(`\nLine items on the deal: ${ids.length}`);
+  if (ids.length) {
+    const items = await hubspot.readLineItems(ids, ['name', 'hs_sku', 'quantity', 'price', 'amount', 'hs_position_on_quote', LINE_ITEM_KEY]);
+    items.sort((a, b) => Number(a.properties?.hs_position_on_quote ?? 0) - Number(b.properties?.hs_position_on_quote ?? 0));
+    for (const { properties: li = {} } of items) {
+      const key = li[LINE_ITEM_KEY] ? `   (calculator line ${li[LINE_ITEM_KEY]})` : '';
+      console.log(`    ${String(li.name ?? '').padEnd(44)} SKU ${String(li.hs_sku || '-').padEnd(16)} qty ${String(li.quantity ?? '').padEnd(6)} price ${String(li.price ?? '').padEnd(8)} amount ${li.amount ?? ''}${key}`);
+    }
+  }
+  return 0;
 }
 
 async function setup() {
