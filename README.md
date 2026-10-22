@@ -61,7 +61,7 @@ items on later syncs.
 | A line's calculated quantity / price / name changed | That line item is updated in place |
 | A line is no longer in the output (excluded, quantity 0, calculator no longer applies) | That line item removed |
 | A line's product changed | Old line item removed, new one created from the new product |
-| A line's calculated values did **not** change | **Left as the team left it**: hand edits, or a deliberate deletion, stand |
+| A line's calculated values did **not** change | **Left as the team left it**: hand edits, or a deliberate deletion, stand (with a [go-ahead](#settings), giving it again adds deleted lines back) |
 | Line items added by hand (no calculator key) | **Never touched** |
 | Discounts, tax or other fields the team edits | **Never touched**: only quantity, position and (if configured) price, name and description are managed |
 | Line items from a calculator whose file was removed from the config | **Never touched** (`npm run plan` lists them) |
@@ -359,6 +359,9 @@ automation sets once it has validated the calculation:
 - If the calculator values or the status change while a sync is running, `afterSync` waits for
   the next sync (which that change triggers), so it never uses up a go-ahead on output it
   didn't apply.
+- Giving the go-ahead again also adds back any calculator lines the team deleted; lines still on
+  the deal keep their hand edits unless their calculated values changed. To re-apply every line,
+  run `npm run sync -- <deal id> --force` while the status is *Add line items*.
 - If a sync can't apply the lines (a blank input, a missing SKU, a quote on the deal), the
   status is left as it is and "Calculator line items: status" says why.
 - Use internal names for the property and the option (`npm run inspect` lists them);

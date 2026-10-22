@@ -128,12 +128,13 @@ export class LineItemSync {
       return status('error', STATUS.error, MESSAGES.inputErrors(evaluation.errors), { errors: evaluation.errors });
     }
 
-    // The go-ahead was given again with nothing to change: just save
-    // settings.afterSync. The deal's message still describes its lines.
-    if (!force && t.reason === 'afterSync') {
-      const dealText = properties[DEAL.message] || MESSAGES.alreadyMatch;
-      return status('unchanged', STATUS.synced, 'No line item changes needed.', { desired: evaluation.lines }, undefined, dealText);
-    }
+    // A go-ahead (settings.afterSync due) asks for the calculator's line
+    // items: lines the team deleted are added back (step 4), while lines
+    // still on the deal keep hand edits unless their calculated values changed.
+    const goAhead = !force && afterSyncDue(this.config, properties);
+    // What the deal shows once its lines match the calculator.
+    const matchMessage = (plan) =>
+      evaluation.lines.length ? MESSAGES.alreadyMatch : plan?.orphans.length ? MESSAGES.orphansLeft(plan.orphans.length) : MESSAGES.noCalculator;
 
     // Nothing to do if every line is what was last applied (decided before
     // any API call). This leaves the team's edits alone when something
@@ -169,34 +170,32 @@ export class LineItemSync {
     // 3. Every line already matches what was last applied (the status just
     // needs to say so, e.g. after an error was fixed).
     const upToDate = !force && stored && changedKeys(stored, fingerprints).size === 0;
-    if (upToDate && !dryRun) return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired }, fingerprint);
+    if (upToDate && !dryRun && !goAhead) return status('unchanged', STATUS.synced, matchMessage(), { desired }, fingerprint);
 
     // 4. Compare with the deal's current line items. Only lines whose
     // calculated values changed are re-applied (all of them when forced, or
     // when there's no usable fingerprint from an earlier sync).
     const scope = force || !stored ? null : changedKeys(stored, fingerprints);
     const existing = await this.#readLineItems(dealId);
+    const present = new Set(existing.map((item) => item.properties?.[LINE_ITEM_KEY]));
+    const missing = goAhead ? desired.filter((line) => !present.has(line.key)).map((line) => line.key) : [];
+    missing.forEach((key) => scope?.add(key));
     unmanaged = existing
       .filter((item) => !item.properties?.[LINE_ITEM_KEY])
       .map(({ id, properties: p = {} }) => ({ id: String(id), name: p.name ?? '', productId: p.hs_product_id ?? null, quantity: p.quantity ?? null, price: p.price ?? null }));
     const plan = planReconciliation(desired, existing, { calculatorIds: this.calculatorIds, scope });
-    // A dry run reads the lines so plan can list them, but reports what a
-    // real run does (step 3): nothing changed.
-    if (upToDate) {
+    // Step 3 (for a dry run, which reads the lines so plan can list them, or
+    // a go-ahead with no line missing): nothing to change.
+    if (upToDate && !missing.length) {
       const keep = [...plan.keep, ...plan.reorder, ...plan.archive].map(({ id, key }) => ({ id, key }));
       const shown = { ...plan, create: [], update: [], reorder: [], archive: [], keep };
-      return status('unchanged', STATUS.synced, MESSAGES.alreadyMatch, { desired, plan: shown }, fingerprint);
+      return status('unchanged', STATUS.synced, matchMessage(plan), { desired, plan: shown }, fingerprint);
     }
 
     if (isEmptyPlan(plan)) {
       // A forced sync of a deal the service doesn't manage leaves no trace.
       if (t.reason === 'noop') return result('noop', 'No calculator applies to this deal.', { desired, plan });
-      const message = desired.length
-        ? MESSAGES.alreadyMatch
-        : plan.orphans.length
-          ? MESSAGES.orphansLeft(plan.orphans.length)
-          : MESSAGES.noCalculator;
-      return status('unchanged', STATUS.synced, message, { desired, plan }, fingerprint);
+      return status('unchanged', STATUS.synced, matchMessage(plan), { desired, plan }, fingerprint);
     }
 
     // 5. Don't change line items under a quote the team has already built.

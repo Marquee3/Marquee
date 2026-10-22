@@ -287,7 +287,8 @@ test('afterSync moves the go-ahead on in the same update, so later changes wait 
   const again = await sync.syncDeal('7');
   assert.equal(again.outcome, 'unchanged');
   assert.equal(deal().pricing_status, 'line_items_added');
-  assert.deepEqual(hubspot.calls.map((c) => c.name), ['getDeal', 'getDeal', 'updateDeal'], 're-read just before using up the go-ahead');
+  assert.deepEqual(hubspot.writeCalls(), [], 'line items untouched');
+  assert.equal(hubspot.count('updateDeal'), 1, 'one update: status and afterSync');
 });
 
 test('afterSync is not set when line items could not be applied', async () => {
@@ -337,15 +338,34 @@ test('a go-ahead on a deal with no calculator lines is used up too', async () =>
   assert.deepEqual(lines(), []);
 });
 
-test('a repeated go-ahead keeps the deal\'s message', async () => {
+test('a repeated go-ahead with nothing to change says the lines already match', async () => {
   const { hubspot, sync, deal } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
   await sync.syncDeal('7');
-  const message = deal().calc_line_items_message;
   hubspot.editDeal('7', { pricing_status: 'add_line_items' });
   const result = await sync.syncDeal('7');
-  assert.equal(result.message, 'No line item changes needed.', 'nothing was added this time');
+  assert.match(result.message, /already match/, 'nothing was added this time');
   assert.equal(deal().pricing_status, 'line_items_added');
-  assert.equal(deal().calc_line_items_message, message);
+  assert.match(deal().calc_line_items_message, /already match/);
+});
+
+test('a go-ahead adds back calculator lines the team deleted, and keeps hand edits on the others', async () => {
+  const { hubspot, sync, lines } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  await sync.syncDeal('7');
+  const items = hubspot.dealLineItems('7');
+  hubspot.lineItems.delete(items.find((li) => li.properties.calc_line_key === 'licences:seats').id);
+  items.find((li) => li.properties.calc_line_key === 'hardware:mounts').properties.quantity = '9'; // edited by hand
+
+  // Without a go-ahead, a deleted line stays deleted.
+  hubspot.editDeal('7', { dealname: 'renamed' });
+  await sync.syncDeal('7');
+  assert.equal(lines().find((l) => l.key === 'licences:seats'), undefined);
+
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'synced');
+  assert.equal(seats(lines()), '80');
+  assert.equal(lines().find((l) => l.key === 'hardware:mounts').quantity, '9', 'hand edit kept');
+  assert.equal(hubspot.deals.get('7').properties.pricing_status, 'line_items_added');
 });
 
 test('afterSync is left for the next sync if the deal changes while syncing', async () => {
