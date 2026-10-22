@@ -29,6 +29,8 @@ export const MESSAGES = {
   noCalculator: 'No calculator applies to this deal, so it has no calculator line items.',
   orphansLeft: (count) =>
     `No calculator in the current config applies to this deal. ${count} line item${count === 1 ? '' : 's'} from calculators no longer in the config ${count === 1 ? 'was' : 'were'} left as ${count === 1 ? 'it is' : 'they are'}.`,
+  quoteKeptDeleted: (count) =>
+    `This deal has a quote, so ${count} calculator line item${count === 1 ? '' : 's'} deleted from it ${count === 1 ? 'was' : 'were'} not added back.`,
   quoteFirst:
     'This deal already has a quote, so no line items were added. ' +
     'Add them by hand, or delete the quote and then tick and untick "Calculator line items: freeze" to sync.',

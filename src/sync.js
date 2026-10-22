@@ -170,7 +170,9 @@ export class LineItemSync {
     // 3. Every line already matches what was last applied (the status just
     // needs to say so, e.g. after an error was fixed).
     const upToDate = !force && stored && changedKeys(stored, fingerprints).size === 0;
-    if (upToDate && !dryRun && !goAhead) return status('unchanged', STATUS.synced, matchMessage(), { desired }, fingerprint);
+    // (Lines from removed calculators need the line items read to be named.)
+    const shortcut = upToDate && !dryRun && !goAhead && (evaluation.lines.length || !orphanEntries.length);
+    if (shortcut) return status('unchanged', STATUS.synced, matchMessage(), { desired }, fingerprint);
 
     // 4. Compare with the deal's current line items. Only lines whose
     // calculated values changed are re-applied (all of them when forced, or
@@ -204,6 +206,13 @@ export class LineItemSync {
     if (skipWhenQuoteExists) {
       const quotes = await this.hubspot.getAssociatedIds('deals', dealId, 'quotes', { max: 1 });
       if (quotes.length) {
+        // The output hasn't changed; only lines the team deleted would be
+        // added back. Leave them out, but still use up the go-ahead.
+        if (upToDate) {
+          const keep = [...plan.keep, ...plan.reorder, ...plan.archive].map(({ id, key }) => ({ id, key }));
+          const shown = { ...plan, create: [], update: [], reorder: [], archive: [], keep };
+          return status('unchanged', STATUS.synced, MESSAGES.quoteKeptDeleted(missing.length), { desired, plan: shown }, fingerprint);
+        }
         const held = formatFingerprint(storedAll ?? new Map(), { quote: digestOf(fingerprints) });
         return status('skipped', STATUS.skipped, quoteMessage(stored), { desired, plan }, held);
       }

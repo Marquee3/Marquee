@@ -360,8 +360,10 @@ automation sets once it has validated the calculation:
   the next sync (which that change triggers), so it never uses up a go-ahead on output it
   didn't apply.
 - Giving the go-ahead again also adds back any calculator lines the team deleted; lines still on
-  the deal keep their hand edits unless their calculated values changed. To re-apply every line,
-  run `npm run sync -- <deal id> --force` while the status is *Add line items*.
+  the deal keep their hand edits unless their calculated values changed. Once the deal has a
+  quote, deleted lines aren't added back (the status still moves on, and its details say so). To
+  re-apply every line, run `npm run sync -- <deal id> --force` while the status is *Add line
+  items*.
 - If a sync can't apply the lines (a blank input, a missing SKU, a quote on the deal), the
   status is left as it is and "Calculator line items: status" says why.
 - Use internal names for the property and the option (`npm run inspect` lists them);

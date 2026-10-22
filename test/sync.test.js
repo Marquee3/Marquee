@@ -512,6 +512,37 @@ test('a product read from a deal property ("Name (SKU)"): a new SKU replaces the
   assert.match(missing.message, /NOPE-1/);
 });
 
+test('under a quote, a go-ahead leaves deleted lines deleted but is still used up', async () => {
+  const { triage } = await import('../src/triage.js');
+  const { hubspot, sync, deal, lines } = setup({ pricing_status: 'add_line_items' }, { config: GATED });
+  await sync.syncDeal('7');
+  hubspot.lineItems.delete(hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'hardware:mounts').id);
+  hubspot.quotes.set('7', ['555']);
+  hubspot.editDeal('7', { pricing_status: 'add_line_items' });
+  const plan = await sync.syncDeal('7', { dryRun: true });
+  const result = await sync.syncDeal('7');
+  assert.deepEqual([plan.outcome, plan.message], [result.outcome, result.message]);
+  assert.equal(result.outcome, 'unchanged');
+  assert.equal(lines().find((l) => l.key === 'hardware:mounts'), undefined, 'not added back under a quote');
+  assert.equal(deal().pricing_status, 'line_items_added');
+  assert.match(deal().calc_line_items_message, /has a quote, so 1 calculator line item deleted from it was not added back/);
+  assert.doesNotMatch(deal().calc_line_items_message, /output changed/);
+  assert.equal(triage(parseConfig(GATED), deal()).reason, 'syncWhen');
+});
+
+test('with only lines from a removed calculator left, a sync and plan both say so', async () => {
+  const { hubspot, sync, deal } = setup({ rooms: '' });
+  await sync.syncDeal('7');
+  const without = new LineItemSync({ hubspot, config: parseConfig({ calculators: [CONFIG.calculators[0]] }), products: new ProductResolver(hubspot) });
+  hubspot.editDeal('7', { calc_line_items_frozen: 'true' });
+  await without.syncDeal('7');
+  hubspot.editDeal('7', { calc_line_items_frozen: 'false' });
+  const plan = await without.syncDeal('7', { dryRun: true });
+  const real = await without.syncDeal('7');
+  assert.equal(real.message, plan.message);
+  assert.match(deal().calc_line_items_message, /left as it is/);
+});
+
 test('deals no calculator applies to are left untouched', async () => {
   const { hubspot, sync } = setup({ rooms: '', users: '' });
   const result = await sync.syncDeal('7');
