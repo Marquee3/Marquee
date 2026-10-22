@@ -139,7 +139,7 @@ export class LineItemSync {
     // any API call). This leaves the team's edits alone when something
     // unrelated changes on the deal.
     if (!force && !dryRun && (t.reason === 'unchanged' || t.reason === 'quote')) {
-      const message = t.reason === 'quote' ? MESSAGES.quote : 'Calculator output is unchanged since the last sync.';
+      const message = t.reason === 'quote' ? quoteMessage(t.stored) : 'Calculator output is unchanged since the last sync.';
       return result(t.reason === 'quote' ? 'skipped' : 'unchanged', message, { desired: evaluation.lines });
     }
 
@@ -206,7 +206,7 @@ export class LineItemSync {
       const quotes = await this.hubspot.getAssociatedIds('deals', dealId, 'quotes', { max: 1 });
       if (quotes.length) {
         const held = formatFingerprint(storedAll ?? new Map(), { quote: digestOf(fingerprints) });
-        return status('skipped', STATUS.skipped, MESSAGES.quote, { desired, plan }, held);
+        return status('skipped', STATUS.skipped, quoteMessage(stored), { desired, plan }, held);
       }
     }
 
@@ -350,6 +350,12 @@ function describePlan(plan, calculatorNames, duplicatesRemoved = 0) {
 }
 
 // Worth retrying: rate limits, HubSpot outages and network failures.
+// Held back by a quote: before any line was added, or after (stored is
+// what was last applied).
+function quoteMessage(stored) {
+  return stored?.size ? MESSAGES.quote : MESSAGES.quoteFirst;
+}
+
 // Fingerprint value for a line whose last update may have partly failed.
 const UNKNOWN = 'unknown';
 

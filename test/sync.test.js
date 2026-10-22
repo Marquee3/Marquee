@@ -213,6 +213,19 @@ test('deals with a quote are not changed', async () => {
   assert.match(deal().calc_line_items_message, /already has a quote/);
 });
 
+test('a deal that already had a quote before its first sync says no line items were added, once', async () => {
+  const { hubspot, sync, deal, lines } = setup();
+  hubspot.quotes.set('7', ['555']);
+  const result = await sync.syncDeal('7');
+  assert.equal(result.outcome, 'skipped');
+  assert.deepEqual(lines(), []);
+  assert.match(deal().calc_line_items_message, /already has a quote, so no line items were added/);
+  assert.doesNotMatch(deal().calc_line_items_message, /output changed/);
+  const writes = hubspot.count('updateDeal');
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  assert.equal(hubspot.count('updateDeal'), writes, 'not rewritten on every check');
+});
+
 test('deals outside syncWhen are skipped without writing anything', async () => {
   const { hubspot, sync } = setup({ dealstage: 'closedwon' });
   const result = await sync.syncDeal('7');

@@ -78,6 +78,13 @@ test('the shipped PVC hoarding calculator turns a priced deal into line items th
   const total = lines.reduce((sum, l) => sum + l.quantity * (l.price ?? 0), 0);
   assert.equal(total, Number(PRICED_PVC_DEAL.pricing_net_total));
 
+  // Extra delivery and collection runs: the quantity is every chargeable mile, at the mileage rate.
+  const runs = evaluateCalculators(config, { ...PRICED_PVC_DEAL, pricing_delivery_total: '420', pricing_collection_total: '630' });
+  assert.deepEqual(
+    runs.lines.filter((l) => /delivery|collection/.test(l.key)).map((l) => [l.key.split(':')[1], l.quantity, l.price]),
+    [['delivery', 120, 3.5], ['collection', 180, 3.5]],
+  );
+
   // Other calculators, and deals with no doors or no transport, get no such lines.
   assert.deepEqual(evaluateCalculators(config, { ...PRICED_PVC_DEAL, pricing_calculator: 'Other' }).lines, []);
   const plain = evaluateCalculators(config, {
@@ -92,13 +99,17 @@ test('the shipped PVC hoarding calculator turns a priced deal into line items th
 });
 
 test('the shipped settings wait for "Add line items", then move the status on', async () => {
-  const { afterSyncDue } = await import('../src/triage.js');
+  const { afterSyncDue, triage } = await import('../src/triage.js');
   const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
   assert.equal(config.settings.skipWhenQuoteExists, true);
   assert.deepEqual(config.settings.afterSync, { pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' });
   assert.equal(afterSyncDue(config, PRICED_PVC_DEAL), true);
   assert.equal(afterSyncDue(config, { ...PRICED_PVC_DEAL, pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' }), false);
-  assert.equal(config.settings.syncWhen.evaluate({ pricing_status: 'Calculate_requested' }), false);
+  assert.equal(config.settings.syncWhen.evaluate({ ...PRICED_PVC_DEAL, pricing_status: 'Calculate_requested' }), false);
+  // Deals on other calculators share Pricing status but are left alone entirely.
+  for (const other of ['hoarding_hire', 'Other', '']) {
+    assert.equal(triage(config, { ...PRICED_PVC_DEAL, pricing_calculator: other }).reason, 'syncWhen', other);
+  }
 });
 
 test('the example calculators are valid', async () => {

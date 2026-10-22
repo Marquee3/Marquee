@@ -364,6 +364,9 @@ automation sets once it has validated the calculation:
 - Use internal names for the property and the option (`npm run inspect` lists them);
   `npm run check` confirms the option exists and that `afterSync` switches `syncWhen` off. If
   HubSpot refuses the value anyway, the deal shows "Needs attention" with HubSpot's reason.
+- If deals on other calculators (or none) share the status, include the calculator in
+  `syncWhen`, e.g. `pricing_status == "add_line_items" && pricing_calculator == "pvc"`, or
+  their go-ahead is used up too (with no lines added). Add each new calculator's value there.
 - Pick an `afterSync` value no automation reacts to by setting the status back to *Add line
   items*, or the two would keep undoing each other.
 - `afterSync` needs `syncWhen`, can't set a calculator input or one of this app's own

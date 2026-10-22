@@ -46,10 +46,10 @@
     },
     {
       "key": "delivery",
-      "$comment": "The calculator's delivery quantity can be 0 while the delivery is still charged (e.g. 60 chargeable miles × 3.5 = 210), so the quantity is at least the chargeable miles.",
+      "$comment": "Quantity is every chargeable mile, including additional delivery runs: the calculator's delivery total ÷ the mileage rate (e.g. 210 ÷ 3.5 = 60 miles; two runs, 420 ÷ 3.5 = 120). The calculator's own delivery quantity can be 0 while the delivery is charged.",
       "product": { "skuFrom": "pricing_delivery_product" },
       "includeWhen": "coalesce(pricing_delivery_total, 0) > 0",
-      "quantity": "max(coalesce(pricing_delivery_quantity, 0), pricing_delivery_chargeable_miles)",
+      "quantity": "pricing_delivery_total / pricing_transport_mileage_rate",
       "totalPrice": "pricing_delivery_total"
     },
     {
@@ -57,7 +57,7 @@
       "$comment": "As delivery.",
       "product": { "skuFrom": "pricing_collection_product" },
       "includeWhen": "coalesce(pricing_collection_total, 0) > 0",
-      "quantity": "max(coalesce(pricing_collection_quantity, 0), collection_chargeable_miles)",
+      "quantity": "pricing_collection_total / pricing_transport_mileage_rate",
       "totalPrice": "pricing_collection_total"
     },
     {

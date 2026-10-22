@@ -224,6 +224,10 @@ async function check() {
   if (missingApp.length) fail(`App properties missing: ${missingApp.join(', ')}. Run "npm run setup", or create them by hand (see README).`);
   else if (dealProperties && lineItemProps) console.log('✓ App properties exist');
 
+  const fromDeal = config.calculators.flatMap((calc) => calc.lineItems.filter((l) => l.product.skuFrom).map((l) => l.product.skuFrom));
+  if (fromDeal.length) {
+    console.log(`  SKUs read from each deal when it syncs (a SKU missing from the product library shows on that deal): ${fromDeal.join(', ')}`);
+  }
   if (config.skus.length) {
     const { products, errors } = await new ProductResolver(hubspot).resolve(config.skus);
     errors.forEach((e) => fail(`Product: ${e}`));

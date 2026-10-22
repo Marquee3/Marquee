@@ -29,6 +29,9 @@ export const MESSAGES = {
   noCalculator: 'No calculator applies to this deal, so it has no calculator line items.',
   orphansLeft: (count) =>
     `No calculator in the current config applies to this deal. ${count} line item${count === 1 ? '' : 's'} from calculators no longer in the config ${count === 1 ? 'was' : 'were'} left as ${count === 1 ? 'it is' : 'they are'}.`,
+  quoteFirst:
+    'This deal already has a quote, so no line items were added. ' +
+    'Add them by hand, or delete the quote and then tick and untick "Calculator line items: freeze" to sync.',
   quote:
     'The calculator output changed, but this deal already has a quote, so its line items were left as they are. ' +
     'Update them by hand, or delete the quote and then tick and untick "Calculator line items: freeze" to re-sync.',
@@ -164,7 +167,8 @@ export function triage(config, properties) {
     return afterSyncDue(config, properties) ? sync('afterSync', extra) : skip('unchanged', extra);
   }
   // Held back because of a quote, and the output hasn't changed since.
-  if (status === STATUS.skipped && sameText(message, MESSAGES.quote) && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
+  const quoteHeld = sameText(message, MESSAGES.quote) || sameText(message, MESSAGES.quoteFirst);
+  if (status === STATUS.skipped && quoteHeld && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
     return skip('quote', { evaluation, fingerprints, stored, storedAll });
   }
   return sync('changed', { evaluation, fingerprints, stored, storedAll });
