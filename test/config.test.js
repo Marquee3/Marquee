@@ -101,7 +101,7 @@ test('the shipped PVC hoarding calculator turns a priced deal into line items th
 test('the shipped settings wait for "Add line items", then move the status on', async () => {
   const { afterSyncDue, triage } = await import('../src/triage.js');
   const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
-  assert.equal(config.settings.skipWhenQuoteExists, true);
+  assert.equal(config.settings.skipWhenQuoteExists, false);
   assert.deepEqual(config.settings.afterSync, { pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' });
   assert.equal(afterSyncDue(config, PRICED_PVC_DEAL), true);
   assert.equal(afterSyncDue(config, { ...PRICED_PVC_DEAL, pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' }), false);
@@ -326,4 +326,31 @@ test('reports every bad line with calculator and field context', () => {
     'Hardware calculator › b: quantity is negative (-2)',
     "Hardware calculator › c: price is negative (-5); HubSpot line item prices can't be negative",
   ]);
+});
+
+test('the shipped config re-prices a deal that already has a quote, once the go-ahead is given again', async () => {
+  const { FakeHubSpot } = await import('./fake-hubspot.js');
+  const { LineItemSync } = await import('../src/sync.js');
+  const { ProductResolver } = await import('../src/products.js');
+  const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
+  const skus = ['HOARD-24', 'DOOR-SINGLE', 'DOOR-DOUBLE', 'INSTALL-161200', 'DISMANTLE-161200', 'DEL-81200', 'COL-81200', 'CORNER-90'];
+  const hubspot = new FakeHubSpot({
+    deals: { 7: { ...PRICED_PVC_DEAL, pricing_line_items_created: 'false' } },
+    products: skus.map((sku, i) => ({ id: String(i + 1), hs_sku: sku, name: sku, price: '0' })),
+  });
+  const sync = new LineItemSync({ hubspot, config, products: new ProductResolver(hubspot) });
+  const deal = () => hubspot.deals.get('7').properties;
+  const hoarding = () => hubspot.dealLineItems('7').find((li) => li.properties.calc_line_key === 'pvc-hoarding-hire:hoarding').properties;
+
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(deal().pricing_status, 'Ready_for_review');
+  hubspot.quotes.set('7', ['900']);
+
+  // A week longer, re-validated: the lines follow, even with the quote.
+  hubspot.editDeal('7', { pricing_hire_weeks: '28', pricing_hoarding_quantity: '5040', pricing_hoarding_total: '30240', pricing_status: 'Add_line_items' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.equal(hoarding().quantity, '5040');
+  assert.equal(hoarding().description, '180 m × 28 weeks');
+  assert.equal(deal().pricing_status, 'Ready_for_review');
+  assert.equal(hubspot.dealLineItems('7').length, 8);
 });

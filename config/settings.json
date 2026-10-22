@@ -1,6 +1,6 @@
 {
-  "$comment": "Settings that apply to every calculator. See README > Settings. Line items are only added once the pricing has been validated (Pricing status = Add line items) on a deal that uses a calculator configured here; the same update then moves Pricing status to Ready for review and sets Pricing line items created = Yes. When adding a calculator, add its Pricing calculator value to syncWhen.",
-  "skipWhenQuoteExists": true,
+  "$comment": "Settings that apply to every calculator. See README > Settings. Line items are only added once the pricing has been validated (Pricing status = Add line items) on a deal that uses a calculator configured here; the same update then moves Pricing status to Ready for review and sets Pricing line items created = Yes. When adding a calculator, add its Pricing calculator value to syncWhen. skipWhenQuoteExists is off because line items only change when someone sets Add line items, and HubSpot quotes keep their own copies of the line items (checked on a published quote), so re-pricing a quoted deal updates the deal's lines without touching quotes already sent.",
+  "skipWhenQuoteExists": false,
   "setLineOrder": true,
   "syncWhen": "pricing_status == \"Add_line_items\" && pricing_calculator == \"35mm_freestanding_pvc_hoarding_hire\"",
   "afterSync": { "pricing_status": "Ready_for_review", "pricing_line_items_created": "true" }
