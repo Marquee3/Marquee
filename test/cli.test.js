@@ -97,6 +97,9 @@ async function withFakeHubSpot({ scopes, status = 200, dealProperties = null, pr
     if (path === '/crm/objects/2026-09/products/search') return send(200, { results: products });
     const dealPath = path.match(/^\/crm\/objects\/2026-09\/deals\/(\d+)$/);
     if (dealPath) return deals[dealPath[1]] ? send(200, { id: dealPath[1], properties: deals[dealPath[1]] }) : send(404, { message: 'Not found' });
+    if (path === '/crm/associations/2026-09/quotes/line_items/batch/read') {
+      return send(200, { results: Object.keys(quotes).map((id) => ({ from: { id }, to: [{ toObjectId: 9 }, { toObjectId: 77 }] })) });
+    }
     const associated = path.match(/^\/crm\/associations\/2026-09\/deals\/(line_items|quotes)\/batch\/read$/);
     if (associated) {
       const ids = Object.keys(associated[1] === 'quotes' ? quotes : lineItems);
@@ -274,6 +277,7 @@ test('inspect <deal> shows one group of a deal\'s values and its line items', as
     assert.match(result.stdout, /Line items on the deal: 1/);
     assert.match(result.stdout, /#9\s+2\.4m hoarding hire per metre\/week\s+SKU HOARD-24\s+qty 120\s+price 6\s+amount 720/);
     assert.match(result.stdout, /Quotes on the deal: 1\n\s+#31\s+Hoarding hire quote\s+status APPROVAL_NOT_NEEDED/);
+    assert.match(result.stdout, /2 line item\(s\) on the quote; 1 of them shared with the deal \(changing those on the deal changes this quote\)/);
 
     const missing = await cliWithToken(['inspect', '43', '--group', 'pvc_pricing_calculator'], await emptyConfig(), base);
     assert.match(missing.stdout, /Deal 43 not found/);

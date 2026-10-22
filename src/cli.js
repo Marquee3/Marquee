@@ -416,6 +416,7 @@ async function inspectDeal(dealId, group) {
   if (!shown) console.log('    (none)');
 
   const ids = await hubspot.getAssociatedIds('deals', dealId, 'line_items');
+  const onDeal = new Set(ids.map(String));
   console.log(`\nLine items on the deal: ${ids.length}`);
   if (ids.length) {
     const items = await hubspot.readLineItems(ids, ['name', 'hs_sku', 'quantity', 'price', 'amount', 'hs_position_on_quote', LINE_ITEM_KEY]);
@@ -431,6 +432,11 @@ async function inspectDeal(dealId, group) {
   if (quoteIds.length) {
     for (const { id, properties: q = {} } of await hubspot.readQuotes(quoteIds)) {
       console.log(`    #${String(id).padEnd(14)} ${String(q.hs_title ?? '').padEnd(44)} status ${q.hs_status ?? '-'}   created ${q.hs_createdate ?? '-'}`);
+      // Whether the quote has its own copies of the line items, or shares the
+      // deal's (then changing the deal's lines would change the quote too).
+      const quoteLines = (await hubspot.getAssociatedIds('quotes', id, 'line_items')).map(String);
+      const shared = quoteLines.filter((lineId) => onDeal.has(lineId)).length;
+      console.log(`      ${quoteLines.length} line item(s) on the quote; ${shared} of them shared with the deal${shared ? ' (changing those on the deal changes this quote)' : ' (the quote has its own copies)'}`);
     }
   }
   return 0;
