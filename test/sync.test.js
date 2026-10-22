@@ -226,6 +226,18 @@ test('a deal that already had a quote before its first sync says no line items w
   assert.equal(hubspot.count('updateDeal'), writes, 'not rewritten on every check');
 });
 
+test('turning skipWhenQuoteExists off releases deals a quote was holding back', async () => {
+  const { hubspot, sync, lines } = setup();
+  await sync.syncDeal('7');
+  hubspot.quotes.set('7', ['555']);
+  hubspot.editDeal('7', { users: '120' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'skipped');
+  const config = parseConfig({ ...structuredClone(CONFIG), settings: { ...CONFIG.settings, skipWhenQuoteExists: false } });
+  const released = new LineItemSync({ hubspot, config, products: new ProductResolver(hubspot) });
+  assert.equal((await released.syncDeal('7')).outcome, 'synced');
+  assert.equal(lines().find((l) => l.key === 'licences:seats').quantity, '120');
+});
+
 test('deals outside syncWhen are skipped without writing anything', async () => {
   const { hubspot, sync } = setup({ dealstage: 'closedwon' });
   const result = await sync.syncDeal('7');

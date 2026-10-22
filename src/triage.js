@@ -170,7 +170,8 @@ export function triage(config, properties) {
   }
   // Held back because of a quote, and the output hasn't changed since.
   const quoteHeld = sameText(message, MESSAGES.quote) || sameText(message, MESSAGES.quoteFirst);
-  if (status === STATUS.skipped && quoteHeld && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
+  const heldBack = config.settings.skipWhenQuoteExists && status === STATUS.skipped && quoteHeld;
+  if (heldBack && fingerprintMarker(properties[DEAL.fingerprint], 'quote') === digestOf(fingerprints)) {
     return skip('quote', { evaluation, fingerprints, stored, storedAll });
   }
   return sync('changed', { evaluation, fingerprints, stored, storedAll });
