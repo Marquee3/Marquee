@@ -1,7 +1,7 @@
 import { normalizeValues, truthy } from './expression.js';
 import { HubSpotError } from './hubspot.js';
 import { silentLogger } from './logger.js';
-import { DEAL, STATUS } from './properties.js';
+import { DEAL, LINE_ITEM_KEY, STATUS } from './properties.js';
 import {
   LINE_ITEM_READ_PROPERTIES,
   findDuplicates,
@@ -83,7 +83,17 @@ export class LineItemSync {
   async #sync(deal, { dryRun, force }) {
     const dealId = String(deal.id);
     const properties = deal.properties ?? {};
-    const result = (outcome, message, extra = {}) => ({ dealId, outcome, message, dryRun, ...extra });
+    // Line items not from a calculator, listed by dry runs (plan) so leftover
+    // lines that the calculator lines replace can be spotted.
+    let unmanaged = null;
+    const result = (outcome, message, extra = {}) => ({
+      dealId,
+      outcome,
+      message,
+      dryRun,
+      ...(dryRun && unmanaged?.length ? { unmanaged } : {}),
+      ...extra,
+    });
     // A real run stops at a quote hold (below); a dry run goes on to show the
     // plan, but mustn't report afterSync values a real run wouldn't set.
     const t = triage(this.config, properties);
@@ -166,6 +176,9 @@ export class LineItemSync {
     // when there's no usable fingerprint from an earlier sync).
     const scope = force || !stored ? null : changedKeys(stored, fingerprints);
     const existing = await this.#readLineItems(dealId);
+    unmanaged = existing
+      .filter((item) => !item.properties?.[LINE_ITEM_KEY])
+      .map(({ id, properties: p = {} }) => ({ id: String(id), name: p.name ?? '', productId: p.hs_product_id ?? null, quantity: p.quantity ?? null, price: p.price ?? null }));
     const plan = planReconciliation(desired, existing, { calculatorIds: this.calculatorIds, scope });
     // A dry run reads the lines so plan can list them, but reports what a
     // real run does (step 3): nothing changed.

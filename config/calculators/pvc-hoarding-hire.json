@@ -1,0 +1,70 @@
+{
+  "$comment": "35mm freestanding PVC hoarding hire: the pvc_pricing_calculator deal properties (calculator version HOARDING-2026-01). Each line is priced from the calculator's own total, so the line items add up to Pricing net total. Product properties hold \"Name (SKU)\"; skuFrom uses the SKU in brackets.",
+  "id": "pvc-hoarding-hire",
+  "name": "PVC hoarding hire calculator",
+  "appliesWhen": "pricing_calculator == \"35mm_freestanding_pvc_hoarding_hire\"",
+  "$extras": "Doors, installation, dismantling, delivery, collection and corners are left off when the calculator gives them no total (or no corners); the hoarding line is always expected.",
+  "lineItems": [
+    {
+      "key": "hoarding",
+      "$comment": "Quantity is metre-weeks (length × weeks), e.g. 180 m × 27 weeks = 4860 at the weekly rate per metre.",
+      "product": { "skuFrom": "pricing_hoarding_product" },
+      "quantity": "pricing_hoarding_quantity",
+      "totalPrice": "pricing_hoarding_total",
+      "description": "{{pricing_hoarding_length_m}} m × {{pricing_hire_weeks}} weeks"
+    },
+    {
+      "key": "single-doors",
+      "$comment": "Quantity is door-weeks (doors × weeks).",
+      "product": { "sku": "DOOR-SINGLE" },
+      "includeWhen": "coalesce(pricing_single_door_total, 0) > 0",
+      "quantity": "pricing_single_door_quantity",
+      "totalPrice": "pricing_single_door_total",
+      "description": "{{pricing_single_doors}} {{if(pricing_single_doors == 1, \"door\", \"doors\")}} × {{pricing_hire_weeks}} weeks"
+    },
+    {
+      "key": "double-doors",
+      "product": { "sku": "DOOR-DOUBLE" },
+      "includeWhen": "coalesce(pricing_double_door_total, 0) > 0",
+      "quantity": "pricing_double_door_quantity",
+      "totalPrice": "pricing_double_door_total",
+      "description": "{{pricing_double_doors}} {{if(pricing_double_doors == 1, \"door\", \"doors\")}} × {{pricing_hire_weeks}} weeks"
+    },
+    {
+      "key": "installation",
+      "product": { "skuFrom": "pricing_install_product" },
+      "includeWhen": "coalesce(pricing_install_total, 0) > 0",
+      "quantity": "pricing_install_shifts",
+      "totalPrice": "pricing_install_total"
+    },
+    {
+      "key": "dismantling",
+      "product": { "skuFrom": "pricing_dismantle_product" },
+      "includeWhen": "coalesce(pricing_dismantle_total, 0) > 0",
+      "quantity": "pricing_dismantle_shifts",
+      "totalPrice": "pricing_dismantle_total"
+    },
+    {
+      "key": "delivery",
+      "$comment": "The calculator's delivery quantity can be 0 while the delivery is still charged (e.g. 60 chargeable miles × 3.5 = 210), so the quantity is at least the chargeable miles.",
+      "product": { "skuFrom": "pricing_delivery_product" },
+      "includeWhen": "coalesce(pricing_delivery_total, 0) > 0",
+      "quantity": "max(coalesce(pricing_delivery_quantity, 0), pricing_delivery_chargeable_miles)",
+      "totalPrice": "pricing_delivery_total"
+    },
+    {
+      "key": "collection",
+      "$comment": "As delivery.",
+      "product": { "skuFrom": "pricing_collection_product" },
+      "includeWhen": "coalesce(pricing_collection_total, 0) > 0",
+      "quantity": "max(coalesce(pricing_collection_quantity, 0), collection_chargeable_miles)",
+      "totalPrice": "pricing_collection_total"
+    },
+    {
+      "key": "corners",
+      "$comment": "Not priced by the calculator; listed at the product price (£0) so the corners appear on the quote.",
+      "product": { "sku": "CORNER-90" },
+      "quantity": "coalesce(pricing_corners_90, 0)"
+    }
+  ]
+}

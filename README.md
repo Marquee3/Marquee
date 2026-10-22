@@ -303,7 +303,8 @@ One calculator per file in `config/calculators/`:
   "lineItems": [
     {
       "key": "seats",                     // unique within the calculator
-      "product": { "sku": "LIC-SEAT" },   // or { "id": "1234567" } (HubSpot product ID)
+      "product": { "sku": "LIC-SEAT" },   // or { "id": "1234567" } (HubSpot product ID), or
+                                          // { "skuFrom": "deal_property" } (see below)
       "quantity": "licence_seats",
       "unitPrice": "licence_price_per_seat", // optional: price per unit
       // "totalPrice": "...",             // optional instead: line total; divided by quantity
@@ -317,6 +318,11 @@ One calculator per file in `config/calculators/`:
 
 - Leave out `unitPrice`/`totalPrice` to use the product library price. Leave out `name` to use the
   product name.
+- `"skuFrom": "pricing_delivery_product"` reads the SKU from a deal property when the deal syncs,
+  for calculators that pick the product themselves (e.g. a delivery band). The property can hold
+  just the SKU, or `Name (SKU)` such as `Delivery – 81–200m vehicle (DEL-81200)`. When it changes,
+  the old line is removed and one for the new product added. An empty property, or a SKU that
+  isn't in the product library, shows as "Needs attention".
 - A quantity of **0 leaves the line off**, so "no travel" needs no special rule. Negative
   quantities and prices are errors.
 - Without `appliesWhen`, a calculator applies to **every** deal; `npm run check` warns about this.

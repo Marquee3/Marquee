@@ -471,10 +471,11 @@ async function plan(dealId, { force }) {
   if (result.desired) {
     console.log(`Line items the calculators produce for deal ${dealId}:`);
     if (!result.desired.length) console.log('  (none)');
+    const width = Math.max(28, ...result.desired.map((line) => line.key.length + 1));
     for (const line of result.desired) {
       const product = line.product.sku ? `SKU ${line.product.sku}${line.productId ? ` (#${line.productId})` : ''}` : `product #${line.product.id}`;
       const price = line.price === null ? 'product price' : line.price;
-      console.log(`  ${line.key.padEnd(28)} ${product.padEnd(32)} qty ${String(line.quantity).padEnd(8)} price ${price}${line.name ? `  "${line.name}"` : ''}`);
+      console.log(`  ${line.key.padEnd(width)} ${product.padEnd(32)} qty ${String(line.quantity).padEnd(8)} price ${price}${line.name ? `  "${line.name}"` : ''}`);
     }
   }
   if (result.plan) {
@@ -486,6 +487,15 @@ async function plan(dealId, { force }) {
     keep.forEach((k) => console.log(`  = keep   ${k.key} (#${k.id})`));
     orphans.forEach((o) => console.log(`  ? leave  ${o.key} (#${o.id}): its calculator is no longer in the config`));
     if (!create.length && !update.length && !archive.length) console.log('  (no changes needed)');
+  }
+  if (result.unmanaged) {
+    const calculatorProducts = new Set((result.desired ?? []).map((line) => String(line.productId)));
+    console.log('\nOther line items on the deal (not from a calculator, so never changed):');
+    for (const item of result.unmanaged) {
+      const same = calculatorProducts.has(String(item.productId)) ? '   <- same product as a calculator line' : '';
+      console.log(`  - ${item.name} (#${item.id}) qty ${item.quantity ?? '-'} price ${item.price ?? '-'}${same}`);
+    }
+    if (result.desired?.length) console.log('  If the calculator lines replace these, delete them in HubSpot, or the deal will have both.');
   }
   if (result.afterSync) {
     const shown = Object.entries(result.afterSync).map(([name, value]) => `${name} = ${value === '' ? '(blank)' : value}`).join(', ');

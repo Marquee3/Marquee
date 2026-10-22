@@ -38,11 +38,67 @@ async function configDirWith(files) {
 
 const LINE = { key: 'a', product: { id: '1' }, quantity: 1 };
 
-test('the shipped config loads, with no calculators yet', async () => {
+// Deal 527356014825 as priced by the PVC hoarding calculator (postcodes left out).
+const PRICED_PVC_DEAL = {
+  collection_chargeable_miles: '60', pricing_additional_collection_runs: '0', pricing_additional_delivery_runs: '0',
+  pricing_approved: 'yes', pricing_calculator: '35mm_freestanding_pvc_hoarding_hire',
+  pricing_collection_product: 'Collection – 81–200m vehicle (COL-81200)', pricing_collection_quantity: '0', pricing_collection_total: '210.0',
+  pricing_corners_90: '8', pricing_crew_size: '5', pricing_delivery_chargeable_miles: '60',
+  pricing_delivery_product: 'Delivery – 81–200m vehicle (DEL-81200)', pricing_delivery_quantity: '0', pricing_delivery_total: '210.0',
+  pricing_dismantle_product: 'Dismantling – 161–200m (DISMANTLE-161200)', pricing_dismantle_shifts: '1', pricing_dismantle_total: '1000',
+  pricing_distance_checked: 'yes', pricing_double_door_quantity: '54', pricing_double_door_total: '1350', pricing_double_doors: '2',
+  pricing_gross_total: '40164.00', pricing_hire_weeks: '27', pricing_hoarding_height: '2_4m', pricing_hoarding_length_m: '180',
+  pricing_hoarding_product: '2.4m hoarding hire per metre/week (HOARD-24)', pricing_hoarding_quantity: '4860', pricing_hoarding_rate: '6',
+  pricing_hoarding_total: '29160', pricing_install_product: 'Installation – 161–200m (INSTALL-161200)', pricing_install_shifts: '1',
+  pricing_install_total: '1000', pricing_mileage_band: '31–80 miles', pricing_mileage_rate: '2.6', pricing_net_total: '33470.0',
+  pricing_one_way_miles: '60', pricing_outside_matrix: 'false', pricing_return_miles: '120', pricing_shift_rate: '1000',
+  pricing_single_door_quantity: '27', pricing_single_door_total: '540', pricing_single_doors: '1', pricing_status: 'Add_line_items',
+  pricing_transport_mileage_rate: '3.5', pricing_transport_vehicle_band: '81–200m vehicle', pricing_vat_total: '6694.00',
+  pricing_version: 'HOARDING-2026-01',
+};
+
+test('the shipped PVC hoarding calculator turns a priced deal into line items that add up to its net total', async () => {
   const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
-  assert.deepEqual(config.calculators, []);
+  assert.deepEqual(config.calculators.map((c) => c.id), ['pvc-hoarding-hire']);
+  const { lines, errors } = evaluateCalculators(config, PRICED_PVC_DEAL);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(
+    lines.map((l) => [l.key.split(':')[1], l.product.sku, l.quantity, l.price, l.description]),
+    [
+      ['hoarding', 'HOARD-24', 4860, 6, '180 m × 27 weeks'],
+      ['single-doors', 'DOOR-SINGLE', 27, 20, '1 door × 27 weeks'],
+      ['double-doors', 'DOOR-DOUBLE', 54, 25, '2 doors × 27 weeks'],
+      ['installation', 'INSTALL-161200', 1, 1000, null],
+      ['dismantling', 'DISMANTLE-161200', 1, 1000, null],
+      ['delivery', 'DEL-81200', 60, 3.5, null],
+      ['collection', 'COL-81200', 60, 3.5, null],
+      ['corners', 'CORNER-90', 8, null, null],
+    ],
+  );
+  const total = lines.reduce((sum, l) => sum + l.quantity * (l.price ?? 0), 0);
+  assert.equal(total, Number(PRICED_PVC_DEAL.pricing_net_total));
+
+  // Other calculators, and deals with no doors or no transport, get no such lines.
+  assert.deepEqual(evaluateCalculators(config, { ...PRICED_PVC_DEAL, pricing_calculator: 'Other' }).lines, []);
+  const plain = evaluateCalculators(config, {
+    ...PRICED_PVC_DEAL,
+    pricing_single_door_quantity: '0', pricing_single_door_total: '0', pricing_double_door_quantity: '', pricing_double_door_total: '',
+    pricing_delivery_total: '0', pricing_collection_total: '', pricing_corners_90: '', pricing_dismantle_total: '0',
+  });
+  assert.deepEqual(plain.errors, []);
+  assert.deepEqual(plain.lines.map((l) => l.key.split(':')[1]), ['hoarding', 'installation']);
+  // The hoarding line is always expected: a blank hoarding total means the pricing isn't complete.
+  assert.match(evaluateCalculators(config, { ...PRICED_PVC_DEAL, pricing_hoarding_total: '' }).errors[0], /hoarding: totalPrice: deal property "pricing_hoarding_total" is empty/);
+});
+
+test('the shipped settings wait for "Add line items", then move the status on', async () => {
+  const { afterSyncDue } = await import('../src/triage.js');
+  const config = await loadConfig(fileURLToPath(new URL('../config', import.meta.url)));
   assert.equal(config.settings.skipWhenQuoteExists, true);
-  assert.equal(config.settings.setLineOrder, true);
+  assert.deepEqual(config.settings.afterSync, { pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' });
+  assert.equal(afterSyncDue(config, PRICED_PVC_DEAL), true);
+  assert.equal(afterSyncDue(config, { ...PRICED_PVC_DEAL, pricing_status: 'Ready_for_review', pricing_line_items_created: 'true' }), false);
+  assert.equal(config.settings.syncWhen.evaluate({ pricing_status: 'Calculate_requested' }), false);
 });
 
 test('the example calculators are valid', async () => {
@@ -148,7 +204,7 @@ test('collects every problem in one pass', () => {
   });
   const text = problems.join('\n');
   assert.match(text, /calculator "a b"\.id: expected letters/);
-  assert.match(text, /set exactly one of "sku" or "id"/);
+  assert.match(text, /set exactly one of "sku", "skuFrom" or "id"/);
   assert.match(text, /quantity: Invalid expression "ceil\("/);
   assert.match(text, /"x" is already used/);
   assert.match(text, /set unitPrice or totalPrice, not both/);
@@ -179,6 +235,23 @@ test('settings.afterSync: values are kept as text; bad entries are reported', ()
   assert.match(problems[3], /seats: a calculator reads this property/);
   assert.match(problemsOf({ settings: { syncWhen: 'go', afterSync: 'line_items_added' }, calculators: [] })[0], /settings\.afterSync: expected deal property names and values/);
   assert.match(problemsOf({ settings: { afterSync: { go: false } }, calculators: [] })[0], /settings\.afterSync: needs settings\.syncWhen/);
+});
+
+test('a product can be read from a deal property (skuFrom)', () => {
+  const config = parseConfig(minimal([{ key: 'x', product: { skuFrom: 'pricing_delivery_product' }, quantity: 'miles' }]));
+  assert.deepEqual(config.calculators[0].lineItems[0].product, { skuFrom: 'pricing_delivery_product' });
+  assert.ok(config.inputProperties.includes('pricing_delivery_product'));
+  assert.ok(config.calculators[0].inputProperties.includes('pricing_delivery_product'));
+  assert.deepEqual(config.skus, []);
+  assert.match(problemsOf(minimal([{ key: 'x', product: { skuFrom: 'Delivery product' }, quantity: 1 }]))[0], /skuFrom: expected a deal property's internal name/);
+  assert.match(problemsOf(minimal([{ key: 'x', product: { sku: 'A', skuFrom: 'p' }, quantity: 1 }]))[0], /set exactly one of/);
+
+  const evaluate = (value) => evaluateCalculators(config, { miles: '60', pricing_delivery_product: value });
+  assert.equal(evaluate('Delivery – 81–200m vehicle (DEL-81200)').lines[0].product.sku, 'DEL-81200');
+  assert.equal(evaluate('  DEL-030 ').lines[0].product.sku, 'DEL-030');
+  assert.match(evaluate('').errors[0], /product: deal property "pricing_delivery_product" is empty/);
+  assert.match(evaluate('Delivery ()').errors[0], /has no SKU in it/);
+  assert.deepEqual(evaluateCalculators(config, { miles: '0' }).errors, [], 'a line left off needs no product');
 });
 
 test('product ids must be numeric', () => {

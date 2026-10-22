@@ -452,6 +452,33 @@ test('an afterSync that does not end the go-ahead is never set', async () => {
   assert.equal(deal().line_items_ready, undefined);
 });
 
+test('a dry run lists line items not from a calculator', async () => {
+  const { hubspot, sync } = setup();
+  hubspot.addLineItem('7', { name: 'Old hand-added line', hs_product_id: '3', quantity: '1', price: '9' });
+  const plan = await sync.syncDeal('7', { dryRun: true });
+  assert.equal(plan.unmanaged.length, 1);
+  assert.deepEqual(plan.unmanaged[0], { id: plan.unmanaged[0].id, name: 'Old hand-added line', productId: '3', quantity: '1', price: '9' });
+  const real = await sync.syncDeal('7');
+  assert.equal(real.unmanaged, undefined);
+  assert.equal(hubspot.dealLineItems('7').filter((li) => li.properties.name === 'Old hand-added line').length, 1, 'left alone');
+});
+
+test('a product read from a deal property ("Name (SKU)"): a new SKU replaces the line', async () => {
+  const config = {
+    calculators: [{ id: 'transport', appliesWhen: 'miles > 0', lineItems: [{ key: 'delivery', product: { skuFrom: 'delivery_product' }, quantity: 'miles' }] }],
+  };
+  const { hubspot, sync, lines } = setup({ miles: '60', delivery_product: 'Wall mount (HW-MOUNT)' }, { config });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.deepEqual(lines(), [{ key: 'transport:delivery', product: '2', quantity: '60', price: '45' }]);
+  hubspot.editDeal('7', { delivery_product: 'Pro wall mount (HW-MOUNT-PRO)' });
+  assert.equal((await sync.syncDeal('7')).outcome, 'synced');
+  assert.deepEqual(lines(), [{ key: 'transport:delivery', product: '4', quantity: '60', price: '60' }]);
+  hubspot.editDeal('7', { delivery_product: 'Nothing like this (NOPE-1)' });
+  const missing = await sync.syncDeal('7');
+  assert.equal(missing.outcome, 'error');
+  assert.match(missing.message, /NOPE-1/);
+});
+
 test('deals no calculator applies to are left untouched', async () => {
   const { hubspot, sync } = setup({ rooms: '', users: '' });
   const result = await sync.syncDeal('7');

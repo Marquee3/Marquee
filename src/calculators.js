@@ -33,7 +33,7 @@ export function evaluateCalculators(config, dealProperties) {
     for (const line of calc.lineItems) {
       try {
         const result = evaluateLine(line, values);
-        if (result) lines.push({ key: line.fullKey, calculatorId: calc.id, product: line.product, ...result });
+        if (result) lines.push({ key: line.fullKey, calculatorId: calc.id, ...result });
       } catch (err) {
         errors.push(`${calc.name} › ${line.key}: ${messageOf(err)}`);
       }
@@ -61,11 +61,23 @@ function evaluateLine(line, values) {
   }
 
   return {
+    product: line.product.skuFrom ? { sku: field('product', () => skuIn(values, line.product.skuFrom)) } : line.product,
     quantity,
     price,
     name: textOrNull(line.name && field('name', () => line.name.render(values))),
     description: textOrNull(line.description && field('description', () => line.description.render(values))),
   };
+}
+
+// The SKU in a deal property: the whole value, or the part in brackets at
+// the end of one like "Delivery – 81–200m vehicle (DEL-81200)".
+function skuIn(values, name) {
+  const value = values[name];
+  if (value === null || value === undefined) throw new ExpressionError(`deal property "${name}" is empty`);
+  const text = String(value).trim();
+  const sku = (text.match(/\(([^()]*)\)$/)?.[1] ?? text).trim();
+  if (!sku) throw new ExpressionError(`deal property "${name}" has no SKU in it ("${text}")`);
+  return sku;
 }
 
 function field(label, fn) {

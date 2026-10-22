@@ -134,7 +134,7 @@ export function parseConfig(raw) {
           calc.lineItems.push({
             key: rawLine.key,
             fullKey: `${rawCalc.id}:${rawLine.key}`,
-            product: parseProduct(rawLine.product, `${lineWhere}.product`, problems),
+            product: parseProduct(rawLine.product, `${lineWhere}.product`, problems, inputProperties),
             quantity: compileField(rawLine.quantity, `${lineWhere}.quantity`, inputProperties),
             unitPrice: compileField(rawLine.unitPrice, `${lineWhere}.unitPrice`, inputProperties),
             totalPrice: compileField(rawLine.totalPrice, `${lineWhere}.totalPrice`, inputProperties),
@@ -149,7 +149,8 @@ export function parseConfig(raw) {
         ...new Set(
           [calc.appliesWhen, ...calc.lineItems.flatMap((l) => [l.quantity, l.unitPrice, l.totalPrice, l.includeWhen, l.name, l.description])]
             .filter(Boolean)
-            .flatMap((compiled) => compiled.identifiers),
+            .flatMap((compiled) => compiled.identifiers)
+            .concat(calc.lineItems.map((l) => l.product.skuFrom).filter(Boolean)),
         ),
       ].sort();
       calculators.push(calc);
@@ -195,19 +196,27 @@ function parseAfterSync(value, problems) {
   return result;
 }
 
-function parseProduct(value, where, problems) {
+function parseProduct(value, where, problems, inputProperties) {
   if (!isObject(value)) {
-    problems.push(`${where}: expected { "sku": "..." } or { "id": "..." }`);
+    problems.push(`${where}: expected { "sku": "..." }, { "skuFrom": "<deal property>" } or { "id": "..." }`);
     return {};
   }
-  checkFields(value, ['sku', 'id'], where, problems);
-  const hasSku = value.sku !== undefined;
-  const hasId = value.id !== undefined;
-  if (hasSku === hasId) {
-    problems.push(`${where}: set exactly one of "sku" or "id"`);
+  checkFields(value, ['sku', 'skuFrom', 'id'], where, problems);
+  const given = ['sku', 'skuFrom', 'id'].filter((name) => value[name] !== undefined);
+  if (given.length !== 1) {
+    problems.push(`${where}: set exactly one of "sku", "skuFrom" or "id"`);
     return {};
   }
-  if (hasSku) {
+  // The SKU is read from a deal property when the deal is synced.
+  if (given[0] === 'skuFrom') {
+    if (typeof value.skuFrom !== 'string' || !PROPERTY_NAME.test(value.skuFrom)) {
+      problems.push(`${where}.skuFrom: expected a deal property's internal name`);
+      return {};
+    }
+    inputProperties.add(value.skuFrom);
+    return { skuFrom: value.skuFrom };
+  }
+  if (given[0] === 'sku') {
     if (typeof value.sku !== 'string' || !value.sku.trim()) problems.push(`${where}.sku: expected text`);
     return { sku: String(value.sku).trim() };
   }
