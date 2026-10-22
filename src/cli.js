@@ -338,7 +338,9 @@ async function inspect() {
         console.log(`  [${group}]`);
       }
       const kind = p.calculated || String(p.fieldType).startsWith('calculation') ? `${p.type}, calculated` : `${p.type}/${p.fieldType}`;
-      const options = p.options?.length ? `  options: ${p.options.map((o) => o.value).slice(0, 12).join(', ')}${p.options.length > 12 ? ', …' : ''}` : '';
+      // Formulas and settings use an option's internal value, not its label.
+      const option = (o) => (o.label && o.label !== o.value ? `${o.label} (${o.value})` : o.value);
+      const options = p.options?.length ? `  options: ${p.options.slice(0, 30).map(option).join(', ')}${p.options.length > 30 ? ', …' : ''}` : '';
       console.log(`    ${p.name.padEnd(40)} ${String(p.label).padEnd(40)} ${kind}${options}`);
     }
   } catch (err) {

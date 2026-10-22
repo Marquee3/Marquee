@@ -168,6 +168,7 @@ test('inspect lists custom deal properties and products', async () => {
     { name: 'dealname', label: 'Deal name', type: 'string', fieldType: 'text', groupName: 'dealinformation', hubspotDefined: true },
     { name: 'licence_seats', label: 'Seats', type: 'number', fieldType: 'number', groupName: 'calculator' },
     { name: 'support_tier', label: 'Support tier', type: 'enumeration', fieldType: 'select', groupName: 'calculator', options: [{ value: 'standard' }, { value: 'premium' }] },
+    { name: 'pricing_status', label: 'Pricing status', type: 'enumeration', fieldType: 'select', groupName: 'calculator', options: [{ label: 'Add line items', value: 'add_line_items' }, { label: 'Line items added', value: 'line_items_added' }] },
     { name: 'calc_line_items_status', label: 'Calculator line items: status', type: 'enumeration', fieldType: 'select', groupName: 'dealinformation' },
   ];
   const products = [{ id: '5', properties: { name: 'Licence seat', hs_sku: 'LIC-SEAT', price: '15' } }, { id: '6', properties: { name: 'Setup', price: '100' } }];
@@ -176,6 +177,7 @@ test('inspect lists custom deal properties and products', async () => {
     assert.equal(result.code, 0, result.stdout);
     assert.match(result.stdout, /licence_seats\s+Seats\s+number\/number/);
     assert.match(result.stdout, /support_tier .*options: standard, premium/);
+    assert.match(result.stdout, /pricing_status .*options: Add line items \(add_line_items\), Line items added \(line_items_added\)/);
     assert.doesNotMatch(result.stdout, /dealname|calc_line_items_status/);
     assert.match(result.stdout, /Licence seat\s+SKU LIC-SEAT/);
     assert.match(result.stdout, /1 product\(s\) have no SKU/);
