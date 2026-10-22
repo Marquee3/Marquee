@@ -420,9 +420,17 @@ async function inspectDeal(dealId, group) {
   if (ids.length) {
     const items = await hubspot.readLineItems(ids, ['name', 'hs_sku', 'quantity', 'price', 'amount', 'hs_position_on_quote', LINE_ITEM_KEY]);
     items.sort((a, b) => Number(a.properties?.hs_position_on_quote ?? 0) - Number(b.properties?.hs_position_on_quote ?? 0));
-    for (const { properties: li = {} } of items) {
+    for (const { id, properties: li = {} } of items) {
       const key = li[LINE_ITEM_KEY] ? `   (calculator line ${li[LINE_ITEM_KEY]})` : '';
-      console.log(`    ${String(li.name ?? '').padEnd(44)} SKU ${String(li.hs_sku || '-').padEnd(16)} qty ${String(li.quantity ?? '').padEnd(6)} price ${String(li.price ?? '').padEnd(8)} amount ${li.amount ?? ''}${key}`);
+      console.log(`    #${String(id).padEnd(14)} ${String(li.name ?? '').padEnd(44)} SKU ${String(li.hs_sku || '-').padEnd(16)} qty ${String(li.quantity ?? '').padEnd(6)} price ${String(li.price ?? '').padEnd(8)} amount ${li.amount ?? ''}${key}`);
+    }
+  }
+
+  const quoteIds = await hubspot.getAssociatedIds('deals', dealId, 'quotes');
+  console.log(`\nQuotes on the deal: ${quoteIds.length}`);
+  if (quoteIds.length) {
+    for (const { id, properties: q = {} } of await hubspot.readQuotes(quoteIds)) {
+      console.log(`    #${String(id).padEnd(14)} ${String(q.hs_title ?? '').padEnd(44)} status ${q.hs_status ?? '-'}   created ${q.hs_createdate ?? '-'}`);
     }
   }
   return 0;

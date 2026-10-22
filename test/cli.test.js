@@ -77,7 +77,7 @@ test('check warns about a calculator that applies to every deal', async () => {
 });
 
 // A tiny HubSpot stand-in for the token and property checks.
-async function withFakeHubSpot({ scopes, status = 200, dealProperties = null, products = [], deals = {}, lineItems = {} }, fn) {
+async function withFakeHubSpot({ scopes, status = 200, dealProperties = null, products = [], deals = {}, lineItems = {}, quotes = {} }, fn) {
   const { createServer } = await import('node:http');
   const server = createServer(async (req, res) => {
     for await (const _ of req);
@@ -97,8 +97,13 @@ async function withFakeHubSpot({ scopes, status = 200, dealProperties = null, pr
     if (path === '/crm/objects/2026-09/products/search') return send(200, { results: products });
     const dealPath = path.match(/^\/crm\/objects\/2026-09\/deals\/(\d+)$/);
     if (dealPath) return deals[dealPath[1]] ? send(200, { id: dealPath[1], properties: deals[dealPath[1]] }) : send(404, { message: 'Not found' });
-    if (path === '/crm/associations/2026-09/deals/line_items/batch/read') {
-      return send(200, { results: Object.keys(deals).map((id) => ({ from: { id }, to: Object.keys(lineItems).map((toObjectId) => ({ toObjectId })) })) });
+    const associated = path.match(/^\/crm\/associations\/2026-09\/deals\/(line_items|quotes)\/batch\/read$/);
+    if (associated) {
+      const ids = Object.keys(associated[1] === 'quotes' ? quotes : lineItems);
+      return send(200, { results: ids.length ? Object.keys(deals).map((id) => ({ from: { id }, to: ids.map((toObjectId) => ({ toObjectId })) })) : [] });
+    }
+    if (path === '/crm/objects/2026-09/quotes/batch/read') {
+      return send(200, { results: Object.entries(quotes).map(([id, properties]) => ({ id, properties })) });
     }
     if (path === '/crm/objects/2026-09/line_items/batch/read') {
       return send(200, { results: Object.entries(lineItems).map(([id, properties]) => ({ id, properties })) });
@@ -259,14 +264,16 @@ test('inspect <deal> shows one group of a deal\'s values and its line items', as
   ];
   const deals = { 42: { pricing_hoarding_product: 'HOARD-24', pricing_hoarding_quantity: '120', pricing_single_doors: '', unific_billing_city: 'Leeds' } };
   const lineItems = { 9: { name: '2.4m hoarding hire per metre/week', hs_sku: 'HOARD-24', quantity: '120', price: '6', amount: '720' } };
-  await withFakeHubSpot({ scopes: ALL_SCOPES, dealProperties, deals, lineItems }, async (base) => {
+  const quotes = { 31: { hs_title: 'Hoarding hire quote', hs_status: 'APPROVAL_NOT_NEEDED', hs_createdate: '2026-10-22T10:00:00Z' } };
+  await withFakeHubSpot({ scopes: ALL_SCOPES, dealProperties, deals, lineItems, quotes }, async (base) => {
     const result = await cliWithToken(['inspect', '42', '--group', 'pvc_pricing_calculator'], await emptyConfig(), base);
     assert.equal(result.code, 0, result.stdout);
     assert.match(result.stdout, /pricing_hoarding_product\s+HOARD-24/);
     assert.match(result.stdout, /pricing_hoarding_quantity\s+120/);
     assert.doesNotMatch(result.stdout, /pricing_single_doors|Leeds/, 'blank values and other groups are left out');
     assert.match(result.stdout, /Line items on the deal: 1/);
-    assert.match(result.stdout, /2\.4m hoarding hire per metre\/week\s+SKU HOARD-24\s+qty 120\s+price 6\s+amount 720/);
+    assert.match(result.stdout, /#9\s+2\.4m hoarding hire per metre\/week\s+SKU HOARD-24\s+qty 120\s+price 6\s+amount 720/);
+    assert.match(result.stdout, /Quotes on the deal: 1\n\s+#31\s+Hoarding hire quote\s+status APPROVAL_NOT_NEEDED/);
 
     const missing = await cliWithToken(['inspect', '43', '--group', 'pvc_pricing_calculator'], await emptyConfig(), base);
     assert.match(missing.stdout, /Deal 43 not found/);

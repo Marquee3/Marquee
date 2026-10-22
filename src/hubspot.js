@@ -246,6 +246,10 @@ export class HubSpotClient {
     return this.#batchRead('products', ids, ['name', 'hs_sku', 'price']);
   }
 
+  readQuotes(ids) {
+    return this.#batchRead('quotes', ids, ['hs_title', 'hs_status', 'hs_createdate']);
+  }
+
   // --- Properties ----------------------------------------------------------------
 
   async getProperties(objectType) {
